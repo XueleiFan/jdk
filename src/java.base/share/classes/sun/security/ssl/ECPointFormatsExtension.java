@@ -64,10 +64,10 @@ final class ECPointFormatsExtension {
             this.formats = formats;
         }
 
-        private ECPointFormatsSpec(HandshakeContext hc,
+        private ECPointFormatsSpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
             if (!m.hasRemaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid ec_point_formats extension: " +
                     "insufficient data"));
@@ -117,11 +117,12 @@ final class ECPointFormatsExtension {
         }
     }
 
-    private static final class ECPointFormatsStringizer implements SSLStringizer {
+    private static final
+            class ECPointFormatsStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new ECPointFormatsSpec(hc, buffer)).toString();
+                return (new ECPointFormatsSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -229,7 +230,8 @@ final class ECPointFormatsExtension {
             }
 
             // Parse the extension.
-            ECPointFormatsSpec spec = new ECPointFormatsSpec(shc, buffer);
+            ECPointFormatsSpec spec =
+                    new ECPointFormatsSpec(shc.conContext, buffer);
 
             // per RFC 4492, uncompressed points must always be supported.
             if (!spec.hasUncompressedFormat()) {
@@ -273,7 +275,8 @@ final class ECPointFormatsExtension {
             }
 
             // Parse the extension.
-            ECPointFormatsSpec spec = new ECPointFormatsSpec(chc, buffer);
+            ECPointFormatsSpec spec =
+                    new ECPointFormatsSpec(chc.conContext, buffer);
 
             // per RFC 4492, uncompressed points must always be supported.
             if (!spec.hasUncompressedFormat()) {

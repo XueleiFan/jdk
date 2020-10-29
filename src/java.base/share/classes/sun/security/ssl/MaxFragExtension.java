@@ -71,10 +71,10 @@ final class MaxFragExtension {
             this.id = id;
         }
 
-        private MaxFragLenSpec(HandshakeContext hc,
+        private MaxFragLenSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             if (buffer.remaining() != 1) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid max_fragment_length extension data"));
             }
@@ -90,9 +90,9 @@ final class MaxFragExtension {
 
     private static final class MaxFragLenStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new MaxFragLenSpec(hc, buffer)).toString();
+                return (new MaxFragLenSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -251,7 +251,7 @@ final class MaxFragExtension {
             }
 
             // Parse the extension.
-            MaxFragLenSpec spec = new MaxFragLenSpec(shc, buffer);
+            MaxFragLenSpec spec = new MaxFragLenSpec(shc.conContext, buffer);
             MaxFragLenEnum mfle = MaxFragLenEnum.valueOf(spec.id);
             if (mfle == null) {
                 throw shc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
@@ -359,7 +359,7 @@ final class MaxFragExtension {
             }
 
             // Parse the extension.
-            MaxFragLenSpec spec = new MaxFragLenSpec(chc, buffer);
+            MaxFragLenSpec spec = new MaxFragLenSpec(chc.conContext, buffer);
             if (spec.id != requestedSpec.id) {
                 throw chc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "The maximum fragment length response is not requested");
@@ -525,7 +525,7 @@ final class MaxFragExtension {
             }
 
             // Parse the extension.
-            MaxFragLenSpec spec = new MaxFragLenSpec(chc, buffer);
+            MaxFragLenSpec spec = new MaxFragLenSpec(chc.conContext, buffer);
             if (spec.id != requestedSpec.id) {
                 throw chc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "The maximum fragment length response is not requested");

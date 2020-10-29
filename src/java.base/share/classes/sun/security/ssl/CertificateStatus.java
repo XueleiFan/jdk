@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -89,11 +89,10 @@ final class CertificateStatus {
         int messageLength = -1;
         final List<byte[]> encodedResponses = new ArrayList<>();
 
-        CertificateStatusMessage(HandshakeContext handshakeContext) {
-            super(handshakeContext);
+        CertificateStatusMessage(HandshakeContext hc) {
+            super(hc.conContext);
 
-            ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             // Get the Certificates from the SSLContextImpl amd the Stapling
             // parameters
@@ -142,9 +141,9 @@ final class CertificateStatus {
             messageLength = messageLength();
         }
 
-        CertificateStatusMessage(HandshakeContext handshakeContext,
+        CertificateStatusMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             statusType = CertStatusRequestType.valueOf((byte)Record.getInt8(m));
             if (statusType == CertStatusRequestType.OCSP) {
@@ -154,7 +153,7 @@ final class CertificateStatus {
                     encodedResponses.add(respDER);
                     encodedResponsesLen = 3 + respDER.length;
                 } else {
-                    throw handshakeContext.conContext.fatal(
+                    throw hc.conContext.fatal(
                             Alert.HANDSHAKE_FAILURE,
                             "Zero-length OCSP Response");
                 }
@@ -173,12 +172,12 @@ final class CertificateStatus {
                 }
 
                 if (respListLen != 0) {
-                    throw handshakeContext.conContext.fatal(
+                    throw hc.conContext.fatal(
                             Alert.INTERNAL_ERROR,
                             "Bad OCSP response list length");
                 }
             } else {
-                throw handshakeContext.conContext.fatal(
+                throw hc.conContext.fatal(
                         Alert.HANDSHAKE_FAILURE,
                         "Unsupported StatusResponseType: " + statusType);
             }
@@ -289,7 +288,8 @@ final class CertificateStatus {
             // Pin the received responses to the SSLSessionImpl.  It will
             // be retrieved by the X509TrustManagerImpl during the certificate
             // checking phase.
-            chc.handshakeSession.setStatusResponses(cst.encodedResponses);
+            ((SSLSessionImpl.ClientSession)
+                chc.handshakeSession).setStatusResponses(cst.encodedResponses);
 
             // Now perform the check
             T12CertificateConsumer.checkServerCerts(chc, chc.deferredCerts);

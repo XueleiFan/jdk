@@ -28,21 +28,19 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.*;
 import java.text.MessageFormat;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Locale;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.*;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
-import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLProtocolException;
-import static sun.security.ssl.ClientAuthType.CLIENT_AUTH_REQUIRED;
 import sun.security.ssl.ClientHello.ClientHelloMessage;
+import sun.security.ssl.NewSessionTicket.SessionTicket;
+import sun.security.ssl.NewSessionTicket.T13SessionTicket;
 import sun.security.ssl.SSLExtension.ExtensionConsumer;
 import sun.security.ssl.SSLExtension.SSLExtensionSpec;
 import sun.security.ssl.SSLHandshake.HandshakeMessage;
-import sun.security.ssl.SessionTicketExtension.SessionTicketSpec;
+import sun.security.ssl.SSLSessionImpl.ClientSession;
+import sun.security.ssl.SSLSessionImpl.ServerSession;
+import sun.security.ssl.ServerHello.ServerHelloMessage;
 import sun.security.util.HexDumpEncoder;
 
 import static sun.security.ssl.SSLExtension.*;
@@ -73,6 +71,11 @@ final class PreSharedKeyExtension {
     static final SSLStringizer shStringizer =
             new SHPreSharedKeyStringizer();
 
+    // The PskIdentity structure defined in RFC 8446:
+    //      struct {
+    //          opaque identity<1..2^16-1>;
+    //          uint32 obfuscated_ticket_age;
+    //      } PskIdentity;
     private static final class PskIdentity {
         final byte[] identity;
         final int obfuscatedAge;
@@ -98,116 +101,139 @@ final class PreSharedKeyExtension {
         }
     }
 
+    // The "pre_shared_key" extension in ClientHello handshake message.
+    //      struct {
+    //          PskIdentity identities<7..2^16-1>;
+    //          PskBinderEntry binders<33..2^16-1>;
+    //      } OfferedPsks;
     private static final
             class CHPreSharedKeySpec implements SSLExtensionSpec {
-        final List<PskIdentity> identities;
-        final List<byte[]> binders;
+        final PskIdentity[] identities;
+        final byte[][] binders;
 
-        CHPreSharedKeySpec(List<PskIdentity> identities, List<byte[]> binders) {
-            this.identities = identities;
-            this.binders = binders;
+        CHPreSharedKeySpec(PskIdentity identity, byte[] binder) {
+            this.identities = new PskIdentity[] {
+                    identity
+                };
+            this.binders = new byte[][]{
+                    binder
+                };
         }
 
-        CHPreSharedKeySpec(HandshakeContext hc,
+        CHPreSharedKeySpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
-            // struct {
-            //     PskIdentity identities<7..2^16-1>;
-            //     PskBinderEntry binders<33..2^16-1>;
-            // } OfferedPsks;
             if (m.remaining() < 44) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                        new SSLProtocolException(
+                throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
                     "Invalid pre_shared_key extension: " +
                     "insufficient data (length=" + m.remaining() + ")"));
             }
 
+            // Read the identifies.
             int idEncodedLength = Record.getInt16(m);
-            if (idEncodedLength < 7) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                        new SSLProtocolException(
+            if (m.remaining() < idEncodedLength) {
+                throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
                     "Invalid pre_shared_key extension: " +
-                    "insufficient identities (length=" + idEncodedLength + ")"));
+                    "insufficient identities (length=" +
+                    idEncodedLength + ")"));
             }
 
-            identities = new ArrayList<>();
-            int idReadLength = 0;
-            while (idReadLength < idEncodedLength) {
-                byte[] id = Record.getBytes16(m);
-                if (id.length < 1) {
-                    throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                            new SSLProtocolException(
-                        "Invalid pre_shared_key extension: " +
-                        "insufficient identity (length=" + id.length + ")"));
+            LinkedList<PskIdentity> identities = new LinkedList<>();
+            int reservedLimit = m.limit();
+            m.limit(m.position() + idEncodedLength);
+            while (m.hasRemaining()) {
+                if (m.remaining() < 7) {
+                    throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
+                        "Invalid pre_shared_key extension: insufficient PSK " +
+                        "identity (length=" + m.remaining() + ")"));
+                }
+
+                byte[] identity = Record.getBytes16(m);
+                if (identity.length < 1) {
+                    throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
+                        "Invalid pre_shared_key extension: insufficient " +
+                        "identity (length=" + identity.length + ")"));
+                }
+
+                if (m.remaining() < 4) {
+                    throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
+                        "Invalid pre_shared_key extension: insufficient " +
+                        "data for obfuscated ticket age (length=" +
+                        m.remaining() + ")"));
                 }
                 int obfuscatedTicketAge = Record.getInt32(m);
 
-                PskIdentity pskId = new PskIdentity(id, obfuscatedTicketAge);
-                identities.add(pskId);
-                idReadLength += pskId.getEncodedLength();
+                identities.add(new PskIdentity(identity, obfuscatedTicketAge));
             }
+            m.limit(reservedLimit);
 
+            // Read the binders.
             if (m.remaining() < 35) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                        new SSLProtocolException(
+                throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
                     "Invalid pre_shared_key extension: " +
                     "insufficient binders data (length=" +
                     m.remaining() + ")"));
             }
 
             int bindersEncodedLen = Record.getInt16(m);
-            if (bindersEncodedLen < 33) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                        new SSLProtocolException(
-                    "Invalid pre_shared_key extension: " +
-                    "insufficient binders (length=" +
-                    bindersEncodedLen + ")"));
+            if (m.remaining() != bindersEncodedLen) {
+                throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
+                    "Invalid pre_shared_key extension: unknown extra data"));
             }
 
-            binders = new ArrayList<>();
-            int bindersReadLength = 0;
-            while (bindersReadLength < bindersEncodedLen) {
-                byte[] binder = Record.getBytes8(m);
-                if (binder.length < 32) {
-                    throw hc.conContext.fatal(Alert.DECODE_ERROR,
-                            new SSLProtocolException(
+            LinkedList<byte[]> binders = new LinkedList<>();
+            while (m.hasRemaining()) {
+                if (bindersEncodedLen < 33) {
+                    throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
                         "Invalid pre_shared_key extension: " +
-                        "insufficient binder entry (length=" +
-                        binder.length + ")"));
+                        "insufficient binders (length=" +
+                        m.remaining() + ")"));
                 }
+                byte[] binder = Record.getBytes8(m);
                 binders.add(binder);
-                bindersReadLength += 1 + binder.length;
-            }
-        }
-
-        int getIdsEncodedLength() {
-            int idEncodedLength = 0;
-            for (PskIdentity curId : identities) {
-                idEncodedLength += curId.getEncodedLength();
             }
 
-            return idEncodedLength;
+            if (binders.size() != identities.size()) {
+                throw tc.fatal(Alert.DECODE_ERROR, new SSLProtocolException(
+                        "Invalid pre_shared_key extension: " +
+                        "unmatched identities and binders " +
+                        "(identities.length=" + identities.size() +
+                        ", binders.length=" + binders.size() + ")"));
+            }
+
+            this.identities = identities.toArray(new PskIdentity[0]);
+            this.binders = binders.toArray(new byte[0][]);
         }
 
-        int getBindersEncodedLength() {
-            int binderEncodedLength = 0;
+        int encodedBinderSize() {
+            int encodedSize = 2;
             for (byte[] curBinder : binders) {
-                binderEncodedLength += 1 + curBinder.length;
+                encodedSize += curBinder.length;
             }
 
-            return binderEncodedLength;
+            return encodedSize;
         }
 
-        byte[] getEncoded() throws IOException {
-            int idsEncodedLength = getIdsEncodedLength();
-            int bindersEncodedLength = getBindersEncodedLength();
-            int encodedLength = 4 + idsEncodedLength + bindersEncodedLength;
-            byte[] buffer = new byte[encodedLength];
-            ByteBuffer m = ByteBuffer.wrap(buffer);
-            Record.putInt16(m, idsEncodedLength);
-            for (PskIdentity curId : identities) {
-                curId.writeEncoded(m);
+        byte[] encode() throws IOException {
+            int identitiesSize = 0;
+            for (PskIdentity pskIdentity : identities) {
+                identitiesSize += pskIdentity.getEncodedLength();
             }
-            Record.putInt16(m, bindersEncodedLength);
+
+            int bindersSize = 0;
+            for (byte[] binder : binders) {
+                bindersSize += 1 + binder.length;
+            }
+
+            int extDataSize = 4 + identitiesSize + bindersSize;
+            byte[] buffer = new byte[extDataSize];
+            ByteBuffer m = ByteBuffer.wrap(buffer);
+
+            Record.putInt16(m, identitiesSize);
+            for (PskIdentity pskIdentity : identities) {
+                pskIdentity.writeEncoded(m);
+            }
+
+            Record.putInt16(m, bindersSize);
             for (byte[] curBinder : binders) {
                 Record.putBytes8(m, curBinder);
             }
@@ -221,8 +247,10 @@ final class PreSharedKeyExtension {
                 "\"PreSharedKey\": '{'\n" +
                 "  \"identities\": '{'\n" +
                 "{0}\n" +
-                "  '}'" +
-                "  \"binders\": \"{1}\",\n" +
+                "  '}'\n" +
+                "  \"binders\": '{'\n" +
+                "{1}\n" +
+                "  '}'\n" +
                 "'}'",
                 Locale.ENGLISH);
 
@@ -234,23 +262,27 @@ final class PreSharedKeyExtension {
             return messageFormat.format(messageFields);
         }
 
-        String identitiesString() {
+        private String identitiesString() {
             HexDumpEncoder hexEncoder = new HexDumpEncoder();
-
             StringBuilder result = new StringBuilder();
             for (PskIdentity curId : identities) {
-                result.append("  {\n"+ Utilities.indent(
-                        hexEncoder.encode(curId.identity), "    ") +
-                        "\n  }\n");
+                result.append("  {\n")
+                      .append(Utilities.indent(
+                            hexEncoder.encode(curId.identity), "    "))
+                       .append("\n  }\n");
             }
 
             return result.toString();
         }
 
-        String bindersString() {
+        private String bindersString() {
+            HexDumpEncoder hexEncoder = new HexDumpEncoder();
             StringBuilder result = new StringBuilder();
             for (byte[] curBinder : binders) {
-                result.append("{" + Utilities.toHexString(curBinder) + "}\n");
+                result.append("  {\n")
+                        .append(Utilities.indent(
+                                hexEncoder.encode(curBinder), "    "))
+                        .append("\n  }\n");
             }
 
             return result.toString();
@@ -260,9 +292,9 @@ final class PreSharedKeyExtension {
     private static final
             class CHPreSharedKeyStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CHPreSharedKeySpec(hc, buffer)).toString();
+                return (new CHPreSharedKeySpec(tc, buffer)).toString();
             } catch (Exception ex) {
                 // For debug logging only, so please swallow exceptions.
                 return ex.getMessage();
@@ -270,24 +302,26 @@ final class PreSharedKeyExtension {
         }
     }
 
+    // The "pre_shared_key" extension in ServerHello handshake message.
+    //      uint16 selected_identity;
     private static final
             class SHPreSharedKeySpec implements SSLExtensionSpec {
-        final int selectedIdentity;
+        final short selectedIdentity;
 
-        SHPreSharedKeySpec(int selectedIdentity) {
+        SHPreSharedKeySpec(short selectedIdentity) {
             this.selectedIdentity = selectedIdentity;
         }
 
-        SHPreSharedKeySpec(HandshakeContext hc,
+        SHPreSharedKeySpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
-            if (m.remaining() < 2) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+            if (m.remaining() != 2) {
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
-                    "Invalid pre_shared_key extension: " +
-                    "insufficient selected_identity (length=" +
+                    "Invalid pre_shared_key extension data (length=" +
                     m.remaining() + ")"));
             }
-            this.selectedIdentity = Record.getInt16(m);
+
+            this.selectedIdentity = (short)Record.getInt16(m);
         }
 
         byte[] getEncoded() {
@@ -316,9 +350,9 @@ final class PreSharedKeyExtension {
     private static final
             class SHPreSharedKeyStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SHPreSharedKeySpec(hc, buffer)).toString();
+                return (new SHPreSharedKeySpec(tc, buffer)).toString();
             } catch (Exception ex) {
                 // For debug logging only, so please swallow exceptions.
                 return ex.getMessage();
@@ -326,6 +360,254 @@ final class PreSharedKeyExtension {
         }
     }
 
+    /**
+     * Network data producer of the "pre_shared_key" extension in a ClientHello
+     * handshake message.
+     */
+    private static final
+    class CHPreSharedKeyProducer implements HandshakeProducer {
+        // Please DON't write to these byte arrays!!!
+        private static final byte[] sha256NominalBinder = new byte[32];
+        private static final byte[] sha384NominalBinder = new byte[48];
+        // private static final byte[] sha512NominalBinder = new byte[64];
+
+        // Prevent instantiation of this class.
+        private CHPreSharedKeyProducer() {
+            // blank
+        }
+
+        @Override
+        public byte[] produce(
+                ConnectionContext context,
+                HandshakeMessage message) throws IOException {
+
+            // The producing happens in client side only.
+            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+
+            // Is it a supported and enabled extension?
+            if (!chc.sslConfig.isAvailable(SSLExtension.CH_PRE_SHARED_KEY)) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Ignore unavailable pre_shared_key extension in " +
+                            "ClientHello, and disable session resumption");
+                }
+
+                // no resumption
+                chc.isResumption = false;
+                chc.resumingSession = null;
+
+                return null;
+            }
+
+            if (!chc.isResumption || chc.resumingSession == null) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                        "No pre-share-key extension: not session resumption");
+                }
+
+                return null;
+            }
+
+            if (!chc.resumingSession.protocolVersion.useTLS13PlusSpec()) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Ignore pre-share-key extension: " +
+                            "the negotiated protocol version is " +
+                            chc.resumingSession.protocolVersion);
+                }
+
+                return null;
+            }
+
+            // Is it reproducing this extension because of HelloRetryRequest
+            // or pre-share key binders calculation?
+            CHPreSharedKeySpec spec =
+                    (CHPreSharedKeySpec)chc.handshakeExtensions.get(
+                            SSLExtension.CH_PRE_SHARED_KEY);
+            if (spec != null) {
+                if (message instanceof ClientHelloMessage) {
+                    // Reproduce for pre-share key binders calculation.
+                    return reproduce(chc, (ClientHelloMessage)message, spec);
+                } else if (message instanceof ServerHelloMessage) {
+                    // Reproduce for HelloRetryRequest.
+                    return reproduce(chc,
+                            (ServerHelloMessage)message, spec);
+                } else {
+                    // unlikely
+                    throw chc.conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                            "Unexpected handshake message (" +
+                                    message.handshakeType().name +
+                                    ") for the pre_shared_key extension");
+                }
+            } else if (message instanceof ClientHelloMessage) {
+                // The initial nominal producing of this extension.
+                return nominalProduce(chc, (ClientHelloMessage)message);
+            } else {
+                // unlikely
+                throw chc.conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                        "Unexpected handshake message (" +
+                                message.handshakeType().name +
+                                ") for the pre_shared_key extension");
+            }
+        }
+
+        // The initial nominal producing of this extension, which file the
+        // binders with zeros.
+        private byte[] nominalProduce(
+                ClientHandshakeContext chc,
+                ClientHelloMessage clientHello) throws IOException {
+            // Prepare the identities.
+            SessionTicket sessionTicket =
+                    ((ClientSession)chc.resumingSession).getSessionTicket();
+            if (!(sessionTicket instanceof T13SessionTicket)) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "No pre-share-key extension: " +
+                            "no session ticket available: " + sessionTicket);
+                }
+
+                // no resumption
+                chc.isResumption = false;
+                chc.resumingSession = null;
+
+                return null;
+            }
+
+            T13SessionTicket t13st = (T13SessionTicket)sessionTicket;
+
+            int ticketAge =
+                    (int)(System.currentTimeMillis() - t13st.creationTime);
+            int obfuscatedAge = ticketAge + (t13st.ticketAgeAdd);
+
+            // Prepare the binders.
+            byte[] binder = null;
+            switch (chc.resumingSession.getSuite().hashAlg) {
+                case H_SHA256:
+                    binder = sha256NominalBinder;
+                    break;
+                case H_SHA384:
+                    binder = sha384NominalBinder;
+                    break;
+                case H_NONE:
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.fine(
+                                "No pre-share-key extension: " +
+                                "no negotiated cipher suite");
+                    }
+                    chc.isResumption = false;
+                    chc.resumingSession = null;
+
+                    return null;
+            }
+
+            // Set the negotiated cipher suite for key derivation.
+            chc.negotiatedCipherSuite = chc.resumingSession.cipherSuite;
+
+            // Derive the early secret.
+            SecretKey earlySecret = SSLPseudorandomKeyDerivation
+                    .of(chc, null, t13st.preSharedKey)
+                    .deriveKey("TlsEarlySecret", null);
+
+            // Set the handshake key derivation to use pre-shared key.
+            chc.handshakeKeyDerivation =
+                    new SSLSecretDerivation(chc, earlySecret);
+
+            // Create the pre-shared key spec.
+            CHPreSharedKeySpec spec = new CHPreSharedKeySpec(
+                    new PskIdentity(t13st.ticket, obfuscatedAge),
+                    binder);
+            chc.handshakeExtensions.put(CH_PRE_SHARED_KEY, spec);
+
+            return spec.encode();
+        }
+
+        // Reproduce the extension for pre-share key binders calculation.
+        private byte[] reproduce(
+                ClientHandshakeContext chc,
+                ClientHelloMessage clientHello,
+                CHPreSharedKeySpec spec) throws IOException {
+
+            // Calculate and replace the binder.
+            spec.binders[0] = createBinder(chc, clientHello, spec);
+
+            return spec.encode();
+        }
+
+        // Reproduce the extension for HelloRetryRequest.
+        private byte[] reproduce(
+                ClientHandshakeContext chc,
+                ServerHelloMessage helloRetryRequest,
+                CHPreSharedKeySpec spec) throws IOException {
+            // Check if the resuming cipher suite is selected in the
+            // HelloRetryRequest handshake message.
+            CipherSuite resumingCipherSuite = chc.resumingSession.getSuite();
+            if (chc.negotiatedCipherSuite != resumingCipherSuite ||
+                    helloRetryRequest.cipherSuite != resumingCipherSuite) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "The resuming cipher suite is not selected " +
+                            "selected in the HelloRetryRequest message.");
+                }
+
+                chc.isResumption = false;
+                chc.resumingSession = null;
+                return null;
+            }
+
+            // Calculate and replace the binder.
+            spec.binders[0] =
+                    createBinder(chc, chc.initialClientHelloMsg, spec);
+
+            return spec.encode();
+        }
+
+        private static byte[] createBinder(
+                ClientHandshakeContext chc,
+                ClientHelloMessage clientHello,
+                CHPreSharedKeySpec spec) throws IOException {
+
+            // Calculate and replace the binder.
+            HandshakeHash handshakeHash = chc.handshakeHash.copy();
+            handshakeHash.determine(
+                    chc.resumingSession.protocolVersion,
+                    chc.resumingSession.cipherSuite);
+            HandshakeOutStream hos = new HandshakeOutStream(null);
+            clientHello.write(hos);
+
+            // Exclude the binders bytes for the handshake hash calculation.
+            hos.accept(handshakeHash, 0, hos.size() - spec.encodedBinderSize());
+            handshakeHash.update();
+
+            // Derive the binder key.
+            SSLTrafficKeyDerivation kdg =
+                    SSLTrafficKeyDerivation.valueOf(ProtocolVersion.TLS13);
+            if (kdg == null) {      // unlikely
+                throw chc.conContext.fatal(Alert.INTERNAL_ERROR,
+                        "Not supported key derivation for TLS 1.3");
+            }
+
+            SecretKey binderKey = chc.handshakeKeyDerivation
+                    .deriveKey("TlsResBinderKey", null);
+            SecretKey finishedKey = kdg.createKeyDerivation(chc, binderKey)
+                    .deriveKey("TlsFinished", null);
+
+            String hmacAlg = "Hmac" +
+                    chc.negotiatedCipherSuite.hashAlg.name.replace("-", "");
+            try {
+                Mac hmac = Mac.getInstance(hmacAlg);
+                hmac.init(finishedKey);
+                return hmac.doFinal(handshakeHash.digest());
+            } catch (NoSuchAlgorithmException |InvalidKeyException ex) {
+                throw chc.conContext.fatal(Alert.INTERNAL_ERROR,
+                        "Failed to generate binder", ex);
+            }
+        }
+    }
+
+    /**
+     * Network data consumer of a "pre_shared_key" extension in the ClientHello
+     * handshake message.
+     */
     private static final
             class CHPreSharedKeyConsumer implements ExtensionConsumer {
         // Prevent instantiation of this class.
@@ -337,179 +619,199 @@ final class PreSharedKeyExtension {
         public void consume(ConnectionContext context,
                             HandshakeMessage message,
                             ByteBuffer buffer) throws IOException {
+            // The consuming happens in server side only.
             ClientHelloMessage clientHello = (ClientHelloMessage) message;
             ServerHandshakeContext shc = (ServerHandshakeContext)context;
+
             // Is it a supported and enabled extension?
-            if (!shc.sslConfig.isAvailable(SSLExtension.CH_PRE_SHARED_KEY)) {
+            if (!shc.sslConfig.isAvailable(SSLExtension.CH_PRE_SHARED_KEY) ||
+                !shc.sslConfig.isAvailable(SSLExtension.SH_PRE_SHARED_KEY)) {
+
                 if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                     SSLLogger.fine(
-                            "Ignore unavailable pre_shared_key extension");
+                            "Ignore unavailable pre_shared_key extension, " +
+                            "and disable session resumption");
                 }
-                return;     // ignore the extension
-            }
 
-            // Parse the extension.
-            CHPreSharedKeySpec pskSpec = new CHPreSharedKeySpec(shc, buffer);
+                // no resumption
+                shc.isResumption = false;
+                shc.resumingSession = null;
+
+                return;
+            }
 
             // The "psk_key_exchange_modes" extension should have been loaded.
             if (!shc.handshakeExtensions.containsKey(
                     SSLExtension.PSK_KEY_EXCHANGE_MODES)) {
                 throw shc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Client sent PSK but not PSK modes, or the PSK " +
-                        "extension is not the last extension");
+                                "extension is not the last extension");
             }
 
-            // error if id and binder lists are not the same length
-            if (pskSpec.identities.size() != pskSpec.binders.size()) {
-                throw shc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
-                        "PSK extension has incorrect number of binders");
+            // Is resumption enabled?  The "psk_key_exchange_modes" extension
+            // may have invalidated the session.
+            if (!shc.isResumption) {     // resumingSession may not be set
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Ignore pre_shared_key extension: " +
+                            "no session resumption");
+                }
+
+                return;
             }
 
-            if (shc.isResumption) {     // resumingSession may not be set
-                SSLSessionContextImpl sessionCache = (SSLSessionContextImpl)
-                        shc.sslContext.engineGetServerSessionContext();
-                int idIndex = 0;
-                SSLSessionImpl s = null;
+            // Make sure that the server handshake context's localSupportedSignAlgs
+            // field is populated.  This is particularly important when
+            // client authentication was used in an initial session and it is
+            // now being resumed.
+            if (shc.localSupportedSignAlgs == null) {
+                shc.localSupportedSignAlgs =
+                        SignatureScheme.getSupportedAlgorithms(
+                                shc.sslConfig,
+                                shc.algorithmConstraints, shc.activeProtocols);
+            }
 
-                for (PskIdentity requestedId : pskSpec.identities) {
-                    // If we are keeping state, see if the identity is in the cache
-                    if (requestedId.identity.length == SessionId.MAX_LENGTH) {
-                        s = sessionCache.get(requestedId.identity);
-                    }
-                    // See if the identity is a stateless ticket
-                    if (s == null &&
-                            requestedId.identity.length > SessionId.MAX_LENGTH &&
-                            sessionCache.statelessEnabled()) {
-                        ByteBuffer b =
-                            new SessionTicketSpec(shc, requestedId.identity).
-                                        decrypt(shc);
-                        if (b != null) {
-                            try {
-                                s = new SSLSessionImpl(shc, b);
-                            } catch (IOException | RuntimeException e) {
-                                s = null;
-                            }
-                        }
-                        if (b == null || s == null) {
-                            if (SSLLogger.isOn &&
-                                    SSLLogger.isOn("ssl,handshake")) {
-                                SSLLogger.fine(
-                                        "Stateless session ticket invalid");
-                            }
-                        }
+            // Parse the extension.
+            CHPreSharedKeySpec spec =
+                    new CHPreSharedKeySpec(shc.conContext, buffer);
+
+            int selectedId = 0;
+            ServerSession ticketSession = null;
+            SecretKey preSharedKey = null;
+            SessionTicketManager stm = shc.sslContext.getTicketManager();
+            for (int i = 0; i < spec.identities.length; i++) {
+                PskIdentity pskId = spec.identities[i];
+                if (pskId.identity.length > 40) {   // stateless session ticket
+                    byte[] decodedTicket = stm.decodeTicket(pskId.identity);
+                    if (decodedTicket == null || decodedTicket.length == 0) {
+                        continue;
                     }
 
-                    if (s != null && canRejoin(clientHello, shc, s)) {
+                    Map.Entry<SecretKey, ServerSession> decodedSession =
+                            ServerSession.decodeT13StatelessTicket(
+                                    shc, decodedTicket);
+                    if (decodedSession == null) {
+                        continue;
+                    }
+
+                    preSharedKey = decodedSession.getKey();
+                    if (preSharedKey == null) {
+                        continue;
+                    }
+
+                    ticketSession = decodedSession.getValue();
+                } else {        // stateful session ticket, use session cache
+                    long ticketId = Utilities.toLong(pskId.identity);
+                    byte[] sessionId = Arrays.copyOfRange(
+                            pskId.identity, 8, pskId.identity.length);
+                    ServerSession serverSession =
+                            (ServerSession)shc.sslContext
+                                    .serverCache.getSession(sessionId);
+                    if (serverSession == null ||
+                            serverSession.cannotResume(shc)) {
+                        continue;
+                    }
+
+                    T13SessionTicket t13st =
+                            serverSession.getStatefulSessionTicket(ticketId);
+                    if (t13st == null) {
+                        continue;
+                    }
+
+                    preSharedKey = t13st.preSharedKey;
+                    if (preSharedKey == null) {
+                        continue;
+                    }
+                    ticketSession = serverSession;
+                }
+
+                if (ticketSession != null) {
+                    if (ticketSession.cannotResume(shc)) {
                         if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                            SSLLogger.fine("Resuming session: ", s);
+                            SSLLogger.fine(
+                                    "Retrieved session cannot be resumed",
+                                    ticketSession);
                         }
 
-                        // binder will be checked later
-                        shc.resumingSession = s;
-                        shc.handshakeExtensions.put(SH_PRE_SHARED_KEY,
-                            new SHPreSharedKeySpec(idIndex));   // for the index
+                        ticketSession = null;
+                    } else {
+                        if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                            SSLLogger.fine(
+                                    "Retrieved resuming session (pskId = " +
+                                    selectedId + ")", ticketSession);
+                        }
+                        selectedId = i;
                         break;
                     }
-
-                    ++idIndex;
-                }
-
-                if (idIndex == pskSpec.identities.size()) {
-                    // no resumable session
-                    shc.isResumption = false;
-                    shc.resumingSession = null;
                 }
             }
+
+            if (ticketSession == null) {
+                // no resumption
+                shc.isResumption = false;
+                shc.resumingSession = null;
+
+                return;
+            }
+
+            // Derive the early secret.
+            SecretKey earlySecret = SSLPseudorandomKeyDerivation
+                    .of(shc, null, preSharedKey)
+                    .deriveKey("TlsEarlySecret", null);
+
+            // Set the handshake key derivation to use pre-shared key.
+            shc.handshakeKeyDerivation =
+                    new SSLSecretDerivation(shc, earlySecret);
+
+            // check the binder.
+            byte[] binder = createBinder(shc, spec);
+            if (!Arrays.equals(binder, spec.binders[selectedId])) {
+                throw shc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                        "Incorrect PSK binder value");
+            }
+
             // update the context
+            shc.resumingSession = ticketSession;
             shc.handshakeExtensions.put(
-                SSLExtension.CH_PRE_SHARED_KEY, pskSpec);
+                    SSLExtension.CH_PRE_SHARED_KEY, spec);
+            shc.handshakeExtensions.put(SH_PRE_SHARED_KEY,
+                    new SHPreSharedKeySpec((short)selectedId));
         }
-    }
 
-    private static boolean canRejoin(ClientHelloMessage clientHello,
-        ServerHandshakeContext shc, SSLSessionImpl s) {
+        private static byte[] createBinder(
+                ServerHandshakeContext shc,
+                CHPreSharedKeySpec spec) throws IOException {
 
-        boolean result = s.isRejoinable() && (s.getPreSharedKey() != null);
+            // Truncate the ClientHello message for the binder calculation.
+            HandshakeHash handshakeHash = shc.handshakeHash.copy();
+            handshakeHash.determine(
+                    shc.negotiatedProtocol, shc.negotiatedCipherSuite);
+            handshakeHash.updateWithLastMessageTruncated(spec.encodedBinderSize());
 
-        // Check protocol version
-        if (result && s.getProtocolVersion() != shc.negotiatedProtocol) {
-            if (SSLLogger.isOn &&
-                SSLLogger.isOn("ssl,handshake,verbose")) {
-
-                SSLLogger.finest("Can't resume, incorrect protocol version");
+            // Derive the binder key.
+            SSLTrafficKeyDerivation kdg =
+                    SSLTrafficKeyDerivation.valueOf(ProtocolVersion.TLS13);
+            if (kdg == null) {      // unlikely
+                throw shc.conContext.fatal(Alert.INTERNAL_ERROR,
+                        "Not supported key derivation for TLS 1.3");
             }
-            result = false;
-        }
 
-        // Make sure that the server handshake context's localSupportedSignAlgs
-        // field is populated.  This is particularly important when
-        // client authentication was used in an initial session and it is
-        // now being resumed.
-        if (shc.localSupportedSignAlgs == null) {
-            shc.localSupportedSignAlgs =
-                    SignatureScheme.getSupportedAlgorithms(
-                            shc.sslConfig,
-                            shc.algorithmConstraints, shc.activeProtocols);
-        }
+            SecretKey binderKey = shc.handshakeKeyDerivation
+                    .deriveKey("TlsResBinderKey", null);
+            SecretKey finishedKey = kdg.createKeyDerivation(shc, binderKey)
+                    .deriveKey("TlsFinished", null);
 
-        // Validate the required client authentication.
-        if (result &&
-            (shc.sslConfig.clientAuthType == CLIENT_AUTH_REQUIRED)) {
+            String hmacAlg = "Hmac" +
+                    shc.negotiatedCipherSuite.hashAlg.name.replace("-", "");
             try {
-                s.getPeerPrincipal();
-            } catch (SSLPeerUnverifiedException e) {
-                if (SSLLogger.isOn &&
-                        SSLLogger.isOn("ssl,handshake,verbose")) {
-                    SSLLogger.finest(
-                        "Can't resume, " +
-                        "client authentication is required");
-                }
-                result = false;
-            }
-
-            // Make sure the list of supported signature algorithms matches
-            Collection<SignatureScheme> sessionSigAlgs =
-                s.getLocalSupportedSignatureSchemes();
-            if (result &&
-                !shc.localSupportedSignAlgs.containsAll(sessionSigAlgs)) {
-
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("Can't resume. Session uses different " +
-                        "signature algorithms");
-                }
-                result = false;
+                Mac hmac = Mac.getInstance(hmacAlg);
+                hmac.init(finishedKey);
+                return hmac.doFinal(handshakeHash.digest());
+            } catch (NoSuchAlgorithmException |InvalidKeyException ex) {
+                throw shc.conContext.fatal(Alert.INTERNAL_ERROR,
+                        "Failed to generate binder", ex);
             }
         }
-
-        // ensure that the endpoint identification algorithm matches the
-        // one in the session
-        String identityAlg = shc.sslConfig.identificationProtocol;
-        if (result && identityAlg != null) {
-            String sessionIdentityAlg = s.getIdentificationProtocol();
-            if (!identityAlg.equalsIgnoreCase(sessionIdentityAlg)) {
-                if (SSLLogger.isOn &&
-                    SSLLogger.isOn("ssl,handshake,verbose")) {
-
-                    SSLLogger.finest("Can't resume, endpoint id" +
-                        " algorithm does not match, requested: " +
-                        identityAlg + ", cached: " + sessionIdentityAlg);
-                }
-                result = false;
-            }
-        }
-
-        // Ensure cipher suite can be negotiated
-        if (result && (!shc.isNegotiable(s.getSuite()) ||
-            !clientHello.cipherSuites.contains(s.getSuite()))) {
-            if (SSLLogger.isOn &&
-                    SSLLogger.isOn("ssl,handshake,verbose")) {
-                SSLLogger.finest(
-                    "Can't resume, unavailable session cipher suite");
-            }
-            result = false;
-        }
-
-        return result;
     }
 
     private static final
@@ -522,305 +824,21 @@ final class PreSharedKeyExtension {
         @Override
         public void consume(ConnectionContext context,
                 HandshakeMessage message) throws IOException {
+            // The consuming happens in server side only.
             ServerHandshakeContext shc = (ServerHandshakeContext)context;
-            if (!shc.isResumption || shc.resumingSession == null) {
-                // not resuming---nothing to do
-                return;
-            }
 
-            CHPreSharedKeySpec chPsk = (CHPreSharedKeySpec)
-                    shc.handshakeExtensions.get(SSLExtension.CH_PRE_SHARED_KEY);
-            SHPreSharedKeySpec shPsk = (SHPreSharedKeySpec)
-                    shc.handshakeExtensions.get(SSLExtension.SH_PRE_SHARED_KEY);
-            if (chPsk == null || shPsk == null) {
-                throw shc.conContext.fatal(Alert.INTERNAL_ERROR,
-                        "Required extensions are unavailable");
-            }
+            if (!shc.handshakeExtensions.containsKey(
+                    SSLExtension.CH_KEY_SHARE)) {
+                // No session resumption is allowed if no key_share extension.
+                shc.resumingSession = null;
+                shc.isResumption = false;
 
-            byte[] binder = chPsk.binders.get(shPsk.selectedIdentity);
-
-            // set up PSK binder hash
-            HandshakeHash pskBinderHash = shc.handshakeHash.copy();
-            byte[] lastMessage = pskBinderHash.removeLastReceived();
-            ByteBuffer messageBuf = ByteBuffer.wrap(lastMessage);
-            // skip the type and length
-            messageBuf.position(4);
-            // read to find the beginning of the binders
-            ClientHelloMessage.readPartial(shc.conContext, messageBuf);
-            int length = messageBuf.position();
-            messageBuf.position(0);
-            pskBinderHash.receive(messageBuf, length);
-
-            checkBinder(shc, shc.resumingSession, pskBinderHash, binder);
-        }
-    }
-
-    private static void checkBinder(ServerHandshakeContext shc,
-            SSLSessionImpl session,
-            HandshakeHash pskBinderHash, byte[] binder) throws IOException {
-        SecretKey psk = session.getPreSharedKey();
-        if (psk == null) {
-            throw shc.conContext.fatal(Alert.INTERNAL_ERROR,
-                    "Session has no PSK");
-        }
-
-        SecretKey binderKey = deriveBinderKey(shc, psk, session);
-        byte[] computedBinder =
-                computeBinder(shc, binderKey, session, pskBinderHash);
-        if (!Arrays.equals(binder, computedBinder)) {
-            throw shc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
-                    "Incorect PSK binder value");
-        }
-    }
-
-    // Class that produces partial messages used to compute binder hash
-    static final class PartialClientHelloMessage extends HandshakeMessage {
-
-        private final ClientHello.ClientHelloMessage msg;
-        private final CHPreSharedKeySpec psk;
-
-        PartialClientHelloMessage(HandshakeContext ctx,
-                                  ClientHello.ClientHelloMessage msg,
-                                  CHPreSharedKeySpec psk) {
-            super(ctx);
-
-            this.msg = msg;
-            this.psk = psk;
-        }
-
-        @Override
-        SSLHandshake handshakeType() {
-            return msg.handshakeType();
-        }
-
-        private int pskTotalLength() {
-            return psk.getIdsEncodedLength() +
-                psk.getBindersEncodedLength() + 8;
-        }
-
-        @Override
-        int messageLength() {
-
-            if (msg.extensions.get(SSLExtension.CH_PRE_SHARED_KEY) != null) {
-                return msg.messageLength();
-            } else {
-                return msg.messageLength() + pskTotalLength();
-            }
-        }
-
-        @Override
-        void send(HandshakeOutStream hos) throws IOException {
-            msg.sendCore(hos);
-
-            // complete extensions
-            int extsLen = msg.extensions.length();
-            if (msg.extensions.get(SSLExtension.CH_PRE_SHARED_KEY) == null) {
-                extsLen += pskTotalLength();
-            }
-            hos.putInt16(extsLen - 2);
-            // write the complete extensions
-            for (SSLExtension ext : SSLExtension.values()) {
-                byte[] extData = msg.extensions.get(ext);
-                if (extData == null) {
-                    continue;
-                }
-                // the PSK could be there from an earlier round
-                if (ext == SSLExtension.CH_PRE_SHARED_KEY) {
-                    continue;
-                }
-                int extID = ext.id;
-                hos.putInt16(extID);
-                hos.putBytes16(extData);
-            }
-
-            // partial PSK extension
-            int extID = SSLExtension.CH_PRE_SHARED_KEY.id;
-            hos.putInt16(extID);
-            byte[] encodedPsk = psk.getEncoded();
-            hos.putInt16(encodedPsk.length);
-            hos.write(encodedPsk, 0, psk.getIdsEncodedLength() + 2);
-        }
-    }
-
-    private static final
-            class CHPreSharedKeyProducer implements HandshakeProducer {
-        // Prevent instantiation of this class.
-        private CHPreSharedKeyProducer() {
-            // blank
-        }
-
-        @Override
-        public byte[] produce(ConnectionContext context,
-                HandshakeMessage message) throws IOException {
-
-            // The producing happens in client side only.
-            ClientHandshakeContext chc = (ClientHandshakeContext)context;
-            if (!chc.isResumption || chc.resumingSession == null) {
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("No session to resume.");
-                }
-                return null;
-            }
-
-            // Make sure the list of supported signature algorithms matches
-            Collection<SignatureScheme> sessionSigAlgs =
-                chc.resumingSession.getLocalSupportedSignatureSchemes();
-            if (!chc.localSupportedSignAlgs.containsAll(sessionSigAlgs)) {
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("Existing session uses different " +
-                        "signature algorithms");
-                }
-                return null;
-            }
-
-            // The session must have a pre-shared key
-            SecretKey psk = chc.resumingSession.getPreSharedKey();
-            if (psk == null) {
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("Existing session has no PSK.");
-                }
-                return null;
-            }
-
-            // The PSK ID can only be used in one connections, but this method
-            // may be called twice in a connection if the server sends HRR.
-            // ID is saved in the context so it can be used in the second call.
-            if (chc.pskIdentity == null) {
-                chc.pskIdentity = chc.resumingSession.consumePskIdentity();
-            }
-
-            if (chc.pskIdentity == null) {
                 if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                     SSLLogger.fine(
-                        "PSK has no identity, or identity was already used");
+                            "No key_share extension, " +
+                            "no session resumption is allowed.");
                 }
-                return null;
             }
-
-            //The session cannot be used again. Remove it from the cache.
-            SSLSessionContextImpl sessionCache = (SSLSessionContextImpl)
-                chc.sslContext.engineGetClientSessionContext();
-            sessionCache.remove(chc.resumingSession.getSessionId());
-
-            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                SSLLogger.fine(
-                    "Found resumable session. Preparing PSK message.");
-            }
-
-            List<PskIdentity> identities = new ArrayList<>();
-            int ageMillis = (int)(System.currentTimeMillis() -
-                    chc.resumingSession.getTicketCreationTime());
-            int obfuscatedAge =
-                    ageMillis + chc.resumingSession.getTicketAgeAdd();
-            identities.add(new PskIdentity(chc.pskIdentity, obfuscatedAge));
-
-            SecretKey binderKey =
-                    deriveBinderKey(chc, psk, chc.resumingSession);
-            ClientHelloMessage clientHello = (ClientHelloMessage)message;
-            CHPreSharedKeySpec pskPrototype = createPskPrototype(
-                chc.resumingSession.getSuite().hashAlg.hashLength, identities);
-            HandshakeHash pskBinderHash = chc.handshakeHash.copy();
-
-            byte[] binder = computeBinder(chc, binderKey, pskBinderHash,
-                    chc.resumingSession, chc, clientHello, pskPrototype);
-
-            List<byte[]> binders = new ArrayList<>();
-            binders.add(binder);
-
-            CHPreSharedKeySpec pskMessage =
-                    new CHPreSharedKeySpec(identities, binders);
-            chc.handshakeExtensions.put(CH_PRE_SHARED_KEY, pskMessage);
-            return pskMessage.getEncoded();
-        }
-
-        private CHPreSharedKeySpec createPskPrototype(
-                int hashLength, List<PskIdentity> identities) {
-            List<byte[]> binders = new ArrayList<>();
-            byte[] binderProto = new byte[hashLength];
-            int i = identities.size();
-            while (i-- > 0) {
-                binders.add(binderProto);
-            }
-
-            return new CHPreSharedKeySpec(identities, binders);
-        }
-    }
-
-    private static byte[] computeBinder(
-            HandshakeContext context, SecretKey binderKey,
-            SSLSessionImpl session,
-            HandshakeHash pskBinderHash) throws IOException {
-
-        pskBinderHash.determine(
-                session.getProtocolVersion(), session.getSuite());
-        pskBinderHash.update();
-        byte[] digest = pskBinderHash.digest();
-
-        return computeBinder(context, binderKey, session, digest);
-    }
-
-    private static byte[] computeBinder(
-            HandshakeContext context, SecretKey binderKey,
-            HandshakeHash hash, SSLSessionImpl session,
-            HandshakeContext ctx, ClientHello.ClientHelloMessage hello,
-            CHPreSharedKeySpec pskPrototype) throws IOException {
-
-        PartialClientHelloMessage partialMsg =
-                new PartialClientHelloMessage(ctx, hello, pskPrototype);
-
-        SSLEngineOutputRecord record = new SSLEngineOutputRecord(hash);
-        HandshakeOutStream hos = new HandshakeOutStream(record);
-        partialMsg.write(hos);
-
-        hash.determine(session.getProtocolVersion(), session.getSuite());
-        hash.update();
-        byte[] digest = hash.digest();
-
-        return computeBinder(context, binderKey, session, digest);
-    }
-
-    private static byte[] computeBinder(HandshakeContext context,
-            SecretKey binderKey,
-            SSLSessionImpl session, byte[] digest) throws IOException {
-        try {
-            CipherSuite.HashAlg hashAlg = session.getSuite().hashAlg;
-            HKDF hkdf = new HKDF(hashAlg.name);
-            byte[] label = ("tls13 finished").getBytes();
-            byte[] hkdfInfo = SSLSecretDerivation.createHkdfInfo(
-                    label, new byte[0], hashAlg.hashLength);
-            SecretKey finishedKey = hkdf.expand(
-                    binderKey, hkdfInfo, hashAlg.hashLength, "TlsBinderKey");
-
-            String hmacAlg =
-                "Hmac" + hashAlg.name.replace("-", "");
-            try {
-                Mac hmac = Mac.getInstance(hmacAlg);
-                hmac.init(finishedKey);
-                return hmac.doFinal(digest);
-            } catch (NoSuchAlgorithmException | InvalidKeyException ex) {
-                throw context.conContext.fatal(Alert.INTERNAL_ERROR, ex);
-            }
-        } catch (GeneralSecurityException ex) {
-            throw context.conContext.fatal(Alert.INTERNAL_ERROR, ex);
-        }
-    }
-
-    private static SecretKey deriveBinderKey(HandshakeContext context,
-            SecretKey psk, SSLSessionImpl session) throws IOException {
-        try {
-            CipherSuite.HashAlg hashAlg = session.getSuite().hashAlg;
-            HKDF hkdf = new HKDF(hashAlg.name);
-            byte[] zeros = new byte[hashAlg.hashLength];
-            SecretKey earlySecret = hkdf.extract(zeros, psk, "TlsEarlySecret");
-
-            byte[] label = ("tls13 res binder").getBytes();
-            MessageDigest md = MessageDigest.getInstance(hashAlg.name);
-            byte[] hkdfInfo = SSLSecretDerivation.createHkdfInfo(
-                    label, md.digest(new byte[0]), hashAlg.hashLength);
-            return hkdf.expand(earlySecret,
-                    hkdfInfo, hashAlg.hashLength, "TlsBinderKey");
-        } catch (GeneralSecurityException ex) {
-            throw context.conContext.fatal(Alert.INTERNAL_ERROR, ex);
         }
     }
 
@@ -829,17 +847,16 @@ final class PreSharedKeyExtension {
         @Override
         public void absent(ConnectionContext context,
                            HandshakeMessage message) throws IOException {
-
-            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                SSLLogger.fine(
-                "Handling pre_shared_key absence.");
-            }
-
             ServerHandshakeContext shc = (ServerHandshakeContext)context;
 
             // Resumption is only determined by PSK, when enabled
             shc.resumingSession = null;
             shc.isResumption = false;
+
+            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                SSLLogger.fine(
+                        "No pre-shared key extension, no session resumption.");
+            }
         }
     }
 
@@ -875,6 +892,46 @@ final class PreSharedKeyExtension {
     }
 
     private static final
+    class SHPreSharedKeyProducer implements HandshakeProducer {
+        // Prevent instantiation of this class.
+        private SHPreSharedKeyProducer() {
+            // blank
+        }
+
+        @Override
+        public byte[] produce(ConnectionContext context,
+                              HandshakeMessage message) throws IOException {
+            ServerHandshakeContext shc = (ServerHandshakeContext)context;
+
+            // Is it a supported and enabled extension?
+            if (!shc.sslConfig.isAvailable(SSLExtension.CH_PRE_SHARED_KEY) ||
+                !shc.sslConfig.isAvailable(SSLExtension.SH_PRE_SHARED_KEY)) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Ignore unavailable pre_shared_key extension in " +
+                            "ServerHello, and disable session resumption");
+                }
+
+                // no resumption
+                shc.isResumption = false;
+                shc.resumingSession = null;
+
+                return null;
+            }
+
+            // Note: the spec had been generated while loading the extension in
+            // ClientHello handshake message.
+            SHPreSharedKeySpec spec = (SHPreSharedKeySpec)
+                    shc.handshakeExtensions.get(SH_PRE_SHARED_KEY);
+            if (spec == null) {
+                return null;
+            }
+
+            return spec.getEncoded();
+        }
+    }
+
+    private static final
             class SHPreSharedKeyConsumer implements ExtensionConsumer {
         // Prevent instantiation of this class.
         private SHPreSharedKeyConsumer() {
@@ -894,7 +951,8 @@ final class PreSharedKeyExtension {
                     "Server sent unexpected pre_shared_key extension");
             }
 
-            SHPreSharedKeySpec shPsk = new SHPreSharedKeySpec(chc, buffer);
+            SHPreSharedKeySpec shPsk =
+                    new SHPreSharedKeySpec(chc.conContext, buffer);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
                     "Received pre_shared_key extension: ", shPsk);
@@ -903,11 +961,6 @@ final class PreSharedKeyExtension {
             if (shPsk.selectedIdentity != 0) {
                 throw chc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Selected identity index is not in correct range.");
-            }
-
-            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                SSLLogger.fine(
-                        "Resuming session: ", chc.resumingSession);
             }
         }
     }
@@ -927,27 +980,6 @@ final class PreSharedKeyExtension {
             // request 1.3 resumption.
             chc.resumingSession = null;
             chc.isResumption = false;
-        }
-    }
-
-    private static final
-            class SHPreSharedKeyProducer implements HandshakeProducer {
-        // Prevent instantiation of this class.
-        private SHPreSharedKeyProducer() {
-            // blank
-        }
-
-        @Override
-        public byte[] produce(ConnectionContext context,
-                HandshakeMessage message) throws IOException {
-            ServerHandshakeContext shc = (ServerHandshakeContext)context;
-            SHPreSharedKeySpec psk = (SHPreSharedKeySpec)
-                    shc.handshakeExtensions.get(SH_PRE_SHARED_KEY);
-            if (psk == null) {
-                return null;
-            }
-
-            return psk.getEncoded();
         }
     }
 }

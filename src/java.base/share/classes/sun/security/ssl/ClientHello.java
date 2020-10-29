@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,20 +27,16 @@ package sun.security.ssl;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
+import java.security.*;
 import java.text.MessageFormat;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Locale;
+import java.util.*;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
-import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLProtocolException;
-import static sun.security.ssl.ClientAuthType.CLIENT_AUTH_REQUIRED;
+
 import sun.security.ssl.SSLHandshake.HandshakeMessage;
+import sun.security.ssl.SSLSessionImpl.ClientSession;
+import sun.security.ssl.SSLSessionImpl.ServerSession;
 import sun.security.ssl.SupportedVersionsExtension.CHSupportedVersionsSpec;
 
 /**
@@ -73,7 +69,11 @@ final class ClientHello {
 
         final int                   clientVersion;
         final RandomCookie          clientRandom;
-        final SessionId             sessionId;
+
+        // The sessionId field could be reset by the handshake producer,
+        // otherwise, it could be final.
+        SessionId                   sessionId;
+
         private byte[]              cookie;         // DTLS only
         final int[]                 cipherSuiteIds;
         final List<CipherSuite>     cipherSuites;   // known cipher suites only
@@ -82,11 +82,11 @@ final class ClientHello {
 
         private static final byte[]  NULL_COMPRESSION = new byte[] {0};
 
-        ClientHelloMessage(HandshakeContext handshakeContext,
+        ClientHelloMessage(HandshakeContext hc,
                 int clientVersion, SessionId sessionId,
                 List<CipherSuite> cipherSuites, SecureRandom generator) {
-            super(handshakeContext);
-            this.isDTLS = handshakeContext.sslContext.isDTLS();
+            super(hc.conContext);
+            this.isDTLS = hc.sslContext.isDTLS();
 
             this.clientVersion = clientVersion;
             this.clientRandom = new RandomCookie(generator);
@@ -105,62 +105,10 @@ final class ClientHello {
             this.compressionMethod = NULL_COMPRESSION;
         }
 
-        /* Read up to the binders in the PSK extension. After this method
-         * returns, the ByteBuffer position will be at end of the message
-         * fragment that should be hashed to produce the PSK binder values.
-         * The client of this method can use this position to determine the
-         * message fragment and produce the binder values.
-         */
-        static void readPartial(TransportContext tc,
-                ByteBuffer m) throws IOException {
-            boolean isDTLS = tc.sslContext.isDTLS();
-
-            // version
-            Record.getInt16(m);
-
-            new RandomCookie(m);
-
-            // session ID
-            Record.getBytes8(m);
-
-            // DTLS cookie
-            if (isDTLS) {
-                Record.getBytes8(m);
-            }
-
-            // cipher suite IDs
-            Record.getBytes16(m);
-            // compression method
-            Record.getBytes8(m);
-            // read extensions, if present
-            if (m.remaining() >= 2) {
-                int remaining = Record.getInt16(m);
-                while (remaining > 0) {
-                    int id = Record.getInt16(m);
-                    int extLen = Record.getInt16(m);
-                    remaining -= extLen + 4;
-
-                    if (id == SSLExtension.CH_PRE_SHARED_KEY.id) {
-                        // ensure pre_shared_key is the last extension
-                        if (remaining > 0) {
-                            throw tc.fatal(Alert.ILLEGAL_PARAMETER,
-                                    "pre_shared_key extension is not last");
-                        }
-                        // read only up to the IDs
-                        Record.getBytes16(m);
-                        return;
-                    } else {
-                        m.position(m.position() + extLen);
-
-                    }
-                }
-            }   // Otherwise, ignore the remaining bytes.
-        }
-
-        ClientHelloMessage(HandshakeContext handshakeContext, ByteBuffer m,
+        ClientHelloMessage(HandshakeContext hc, ByteBuffer m,
                 SSLExtension[] supportedExtensions) throws IOException {
-            super(handshakeContext);
-            this.isDTLS = handshakeContext.sslContext.isDTLS();
+            super(hc.conContext);
+            this.isDTLS = hc.sslContext.isDTLS();
 
             this.clientVersion = ((m.get() & 0xFF) << 8) | (m.get() & 0xFF);
             this.clientRandom = new RandomCookie(m);
@@ -168,7 +116,7 @@ final class ClientHello {
             try {
                 sessionId.checkLength(clientVersion);
             } catch (SSLProtocolException ex) {
-                throw handshakeContext.conContext.fatal(
+                throw hc.conContext.fatal(
                         Alert.ILLEGAL_PARAMETER, ex);
             }
             if (isDTLS) {
@@ -179,7 +127,7 @@ final class ClientHello {
 
             byte[] encodedIds = Record.getBytes16(m);
             if (encodedIds.length == 0 || (encodedIds.length & 0x01) != 0) {
-                throw handshakeContext.conContext.fatal(
+                throw hc.conContext.fatal(
                         Alert.ILLEGAL_PARAMETER,
                         "Invalid ClientHello message");
             }
@@ -192,6 +140,7 @@ final class ClientHello {
             this.cipherSuites = getCipherSuites(cipherSuiteIds);
 
             this.compressionMethod = Record.getBytes8(m);
+
             // In TLS 1.3, use of certain extensions is mandatory.
             if (m.hasRemaining()) {
                 this.extensions =
@@ -275,7 +224,8 @@ final class ClientHello {
             List<String> names = new LinkedList<>();
             for (int id : cipherSuiteIds) {
                 names.add(CipherSuite.nameOf(id) +
-                        "(" + Utilities.byte16HexString(id) + ")");            }
+                        "(" + Utilities.byte16HexString(id) + ")");
+            }
 
             return names;
         }
@@ -312,12 +262,6 @@ final class ClientHello {
 
         @Override
         public void send(HandshakeOutStream hos) throws IOException {
-            sendCore(hos);
-            extensions.send(hos);       // In TLS 1.3, use of certain
-                                        // extensions is mandatory.
-        }
-
-        void sendCore(HandshakeOutStream hos) throws IOException {
             hos.putInt8((byte) (clientVersion >>> 8));
             hos.putInt8((byte) clientVersion);
             hos.write(clientRandom.randomBytes, 0, 32);
@@ -327,6 +271,9 @@ final class ClientHello {
             }
             hos.putBytes16(getEncodedCipherSuites());
             hos.putBytes8(compressionMethod);
+
+            extensions.send(hos);       // In TLS 1.3, use of certain
+                                        // extensions is mandatory.
         }
 
         @Override
@@ -412,181 +359,17 @@ final class ClientHello {
             List<CipherSuite> cipherSuites = chc.activeCipherSuites;
 
             //
-            // Try to resume an existing session.
+            // Generate ClientHello with the basic configuration parameters.
             //
-            SSLSessionContextImpl ssci = (SSLSessionContextImpl)
-                    chc.sslContext.engineGetClientSessionContext();
-            SSLSessionImpl session = ssci.get(
-                    chc.conContext.transport.getPeerHost(),
-                    chc.conContext.transport.getPeerPort());
-            if (session != null) {
-                // If unsafe server certificate change is not allowed, reserve
-                // current server certificates if the previous handshake is a
-                // session-resumption abbreviated initial handshake.
-                if (!ClientHandshakeContext.allowUnsafeServerCertChange &&
-                        session.isSessionResumption()) {
-                    try {
-                        // If existing, peer certificate chain cannot be null.
-                        chc.reservedServerCerts =
-                            (X509Certificate[])session.getPeerCertificates();
-                    } catch (SSLPeerUnverifiedException puve) {
-                        // Maybe not certificate-based, ignore the exception.
-                    }
-                }
-
-                if (!session.isRejoinable()) {
-                    session = null;
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                            "Can't resume, the session is not rejoinable");
-                    }
-                }
-            }
-
-            CipherSuite sessionSuite = null;
-            if (session != null) {
-                sessionSuite = session.getSuite();
-                if (!chc.isNegotiable(sessionSuite)) {
-                    session = null;
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                            "Can't resume, unavailable session cipher suite");
-                    }
-                }
-            }
-
-            ProtocolVersion sessionVersion = null;
-            if (session != null) {
-                sessionVersion = session.getProtocolVersion();
-                if (!chc.isNegotiable(sessionVersion)) {
-                    session = null;
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                            "Can't resume, unavailable protocol version");
-                    }
-                }
-            }
-
-            if (session != null &&
-                !sessionVersion.useTLS13PlusSpec() &&
-                SSLConfiguration.useExtendedMasterSecret) {
-
-                boolean isEmsAvailable = chc.sslConfig.isAvailable(
-                    SSLExtension.CH_EXTENDED_MASTER_SECRET, sessionVersion);
-                if (isEmsAvailable && !session.useExtendedMasterSecret &&
-                        !SSLConfiguration.allowLegacyResumption) {
-                    // perform full handshake instead
-                    //
-                    // The client SHOULD NOT offer an abbreviated handshake
-                    // to resume a session that does not use an extended
-                    // master secret.  Instead, it SHOULD offer a full
-                    // handshake.
-                     session = null;
-                }
-
-                if ((session != null) &&
-                        !ClientHandshakeContext.allowUnsafeServerCertChange) {
-                    // It is fine to move on with abbreviate handshake if
-                    // endpoint identification is enabled.
-                    String identityAlg = chc.sslConfig.identificationProtocol;
-                    if (identityAlg == null || identityAlg.isEmpty()) {
-                        if (isEmsAvailable) {
-                            if (!session.useExtendedMasterSecret) {
-                                // perform full handshake instead
-                                session = null;
-                            }   // Otherwise, use extended master secret.
-                        } else {
-                            // The extended master secret extension does not
-                            // apply to SSL 3.0.  Perform a full handshake
-                            // instead.
-                            //
-                            // Note that the useExtendedMasterSecret is
-                            // extended to protect SSL 3.0 connections,
-                            // by discarding abbreviate handshake.
-                            session = null;
-                        }
-                    }
-                }
-            }
-
-            // ensure that the endpoint identification algorithm matches the
-            // one in the session
-            String identityAlg = chc.sslConfig.identificationProtocol;
-            if (session != null && identityAlg != null) {
-                String sessionIdentityAlg =
-                    session.getIdentificationProtocol();
-                if (!identityAlg.equalsIgnoreCase(sessionIdentityAlg)) {
-                    if (SSLLogger.isOn &&
-                    SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest("Can't resume, endpoint id" +
-                            " algorithm does not match, requested: " +
-                            identityAlg + ", cached: " + sessionIdentityAlg);
-                    }
-                    session = null;
-                }
-            }
-
-            if (session != null) {
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
-                    SSLLogger.finest("Try resuming session", session);
-                }
-
-                // only set session id if session is 1.2 or earlier
-                if (!session.getProtocolVersion().useTLS13PlusSpec()) {
-                    sessionId = session.getSessionId();
-                }
-                if (!maxProtocolVersion.equals(sessionVersion)) {
-                    maxProtocolVersion = sessionVersion;
-
-                    // Update protocol version number in underlying socket and
-                    // handshake output stream, so that the output records
-                    // (at the record layer) have the correct version
-                    chc.setVersion(sessionVersion);
-                }
-
-                // If no new session is allowed, force use of the previous
-                // session ciphersuite, and add the renegotiation SCSV if
-                // necessary.
-                if (!chc.sslConfig.enableSessionCreation) {
-                    if (!chc.conContext.isNegotiated &&
-                        !sessionVersion.useTLS13PlusSpec() &&
-                        cipherSuites.contains(
-                            CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV)) {
-                        cipherSuites = Arrays.asList(sessionSuite,
-                            CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
-                    } else {    // otherwise, use renegotiation_info extension
-                        cipherSuites = Arrays.asList(sessionSuite);
-                    }
-
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                            "No new session is allowed, so try to resume " +
-                            "the session cipher suite only", sessionSuite);
-                    }
-                }
-
-                chc.isResumption = true;
-                chc.resumingSession = session;
-            }
-
-            if (session == null) {
-                if (!chc.sslConfig.enableSessionCreation) {
-                    throw new SSLHandshakeException(
-                            "No new session is allowed and " +
-                            "no existing session can be resumed");
-                }
-
-                if (maxProtocolVersion.useTLS13PlusSpec() &&
-                        SSLConfiguration.useCompatibilityMode) {
-                    // In compatibility mode, the TLS 1.3 legacy_session_id
-                    // field MUST be non-empty, so a client not offering a
-                    // pre-TLS 1.3 session MUST generate a new 32-byte value.
-                    sessionId =
-                        new SessionId(true, chc.sslContext.getSecureRandom());
+            ProtocolVersion clientHelloVersion = maxProtocolVersion;
+            if (clientHelloVersion.useTLS13PlusSpec()) {
+                // In (D)TLS 1.3, the client indicates its version preferences
+                // in the "supported_versions" extension and the client_version
+                // (legacy_version) field MUST be set to (D)TLS 1.2.
+                if (clientHelloVersion.isDTLS) {
+                    clientHelloVersion = ProtocolVersion.DTLS12;
+                } else {
+                    clientHelloVersion = ProtocolVersion.TLS12;
                 }
             }
 
@@ -602,7 +385,7 @@ final class ClientHello {
             if (!minimumVersion.useTLS13PlusSpec()) {
                 if (chc.conContext.secureRenegotiation &&
                         cipherSuites.contains(
-                            CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV)) {
+                                CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV)) {
                     // The cipherSuites may be unmodifiable
                     cipherSuites = new LinkedList<>(cipherSuites);
                     cipherSuites.remove(
@@ -618,36 +401,209 @@ final class ClientHello {
                     break;
                 }
             }
+
             if (!negotiable) {
                 throw new SSLHandshakeException("No negotiable cipher suite");
             }
 
-            // Create the handshake message.
-            ProtocolVersion clientHelloVersion = maxProtocolVersion;
-            if (clientHelloVersion.useTLS13PlusSpec()) {
-                // In (D)TLS 1.3, the client indicates its version preferences
-                // in the "supported_versions" extension and the client_version
-                // (legacy_version) field MUST be set to (D)TLS 1.2.
-                if (clientHelloVersion.isDTLS) {
-                    clientHelloVersion = ProtocolVersion.DTLS12;
-                } else {
-                    clientHelloVersion = ProtocolVersion.TLS12;
-                }
-            }
-
+            // Note: use an empty sessionId here, which will be replaced later.
             ClientHelloMessage chm = new ClientHelloMessage(chc,
                     clientHelloVersion.id, sessionId, cipherSuites,
                     chc.sslContext.getSecureRandom());
+            chc.clientHelloVersion = clientHelloVersion.id;
+
+            // Produce the basic configuration extensions.
+            SSLExtension[] basicConfigurationExtensions =
+                    chc.sslConfig.getEnabledExtensions(
+                        SSLHandshake.CLIENT_HELLO, chc.activeProtocols,
+                        // selected from the specific extensions
+                        Arrays.asList(
+                                SSLExtension.CH_SERVER_NAME,
+                                SSLExtension.CH_SUPPORTED_GROUPS,
+                                SSLExtension.CH_SIGNATURE_ALGORITHMS,
+                                SSLExtension.CH_SIGNATURE_ALGORITHMS_CERT,
+                                SSLExtension.CH_ALPN,
+                                SSLExtension.CH_SUPPORTED_VERSIONS,
+                                SSLExtension.CH_CERTIFICATE_AUTHORITIES
+                        ));
+            chm.extensions.produce(chc, basicConfigurationExtensions);
+
+            //
+            // Try to resume an existing session.
+            //
+            chc.clientHelloId = createServiceId(chm,
+                    chc.conContext.transport.getPeerHost(),
+                    chc.conContext.transport.getPeerPort());
+            ClientSession cachedSession =
+                    chc.sslContext.clientCache.get(chc.clientHelloId);
+            if (cachedSession != null && !cachedSession.isValid()) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
+                    SSLLogger.finest(
+                            "Can't resume, the session is not rejoinable");
+                }
+                cachedSession = null;
+            }
+
+            if (cachedSession != null) {
+                CipherSuite sessionSuite = cachedSession.getSuite();
+                if (!chc.isNegotiable(sessionSuite)) {
+                    cachedSession = null;
+                    if (SSLLogger.isOn &&
+                            SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest(
+                            "Can't resume, unavailable session cipher suite");
+                    }
+                }
+            }
+
+            ProtocolVersion sessionVersion = null;
+            if (cachedSession != null) {
+                sessionVersion = cachedSession.getProtocolVersion();
+                if (!chc.isNegotiable(sessionVersion)) {
+                    cachedSession = null;
+                    if (SSLLogger.isOn &&
+                            SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest(
+                            "Can't resume, unavailable protocol version");
+                    }
+                }
+            }
+
+            if (cachedSession != null &&
+                !sessionVersion.useTLS13PlusSpec() &&
+                SSLConfiguration.useExtendedMasterSecret) {
+
+                boolean isEmsAvailable = chc.sslConfig.isAvailable(
+                    SSLExtension.CH_EXTENDED_MASTER_SECRET, sessionVersion);
+                if (isEmsAvailable && !cachedSession.useExtendedMasterSecret &&
+                        !SSLConfiguration.allowLegacyResumption) {
+                    // perform full handshake instead
+                    //
+                    // The client SHOULD NOT offer an abbreviated handshake
+                    // to resume a session that does not use an extended
+                    // master secret.  Instead, it SHOULD offer a full
+                    // handshake.
+                     cachedSession = null;
+                }
+
+                if ((cachedSession != null) &&
+                        !ClientHandshakeContext.allowUnsafeServerCertChange) {
+                    // It is fine to move on with abbreviate handshake if
+                    // endpoint identification is enabled.
+                    String identityAlg = chc.sslConfig.identificationProtocol;
+                    if (identityAlg == null || identityAlg.isEmpty()) {
+                        if (isEmsAvailable) {
+                            if (!cachedSession.useExtendedMasterSecret) {
+                                // perform full handshake instead
+                                cachedSession = null;
+                            }   // Otherwise, use extended master secret.
+                        } else {
+                            // The extended master secret extension does not
+                            // apply to SSL 3.0.  Perform a full handshake
+                            // instead.
+                            //
+                            // Note that the useExtendedMasterSecret is
+                            // extended to protect SSL 3.0 connections,
+                            // by discarding abbreviate handshake.
+                            cachedSession = null;
+                        }
+                    }
+                }
+            }
+
+            // ensure that the endpoint identification algorithm matches the
+            // one in the session
+            String identityAlg = chc.sslConfig.identificationProtocol;
+            if (cachedSession != null && identityAlg != null) {
+                String sessionIdentityAlg =
+                    cachedSession.getIdentificationProtocol();
+                if (!identityAlg.equalsIgnoreCase(sessionIdentityAlg)) {
+                    if (SSLLogger.isOn &&
+                    SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest("Can't resume, endpoint id" +
+                            " algorithm does not match, requested: " +
+                            identityAlg + ", cached: " + sessionIdentityAlg);
+                    }
+                    cachedSession = null;
+                }
+            }
+
+            if (cachedSession != null) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
+                    SSLLogger.finest("Try resuming session", cachedSession);
+                }
+
+                // In compatibility mode, this session_id field MUST be
+                // non-empty for TLS 1.3.  A client which has a cached session
+                // ID set by a pre-TLS 1.3 server SHOULD set this field to
+                // that value.
+                //
+                // For TLS 1.2 and prior versions, always use non-empty field.
+                sessionId = cachedSession.getSessionId();
+
+                chc.isResumption = true;
+                chc.resumingSession = cachedSession;
+            } else {
+                if (!chc.sslConfig.enableSessionCreation) {
+                    throw new SSLHandshakeException(
+                            "No new session is allowed and " +
+                            "no existing session can be resumed");
+                }
+
+                if (maxProtocolVersion.useTLS13PlusSpec() &&
+                        SSLConfiguration.useCompatibilityMode) {
+                    // In compatibility mode, the TLS 1.3 legacy_session_id
+                    // field MUST be non-empty, so a client not offering a
+                    // pre-TLS 1.3 session MUST generate a new 32-byte value.
+                    sessionId = new SessionId(chc.sslContext.getSecureRandom());
+                }
+            }
+
+            // update the SessionId in ClientHello.
+            chm.sessionId = sessionId;
 
             // cache the client random number for further using
             chc.clientHelloRandom = chm.clientRandom;
             chc.clientHelloVersion = clientHelloVersion.id;
 
             // Produce extensions for ClientHello handshake message.
-            SSLExtension[] extTypes = chc.sslConfig.getEnabledExtensions(
-                    SSLHandshake.CLIENT_HELLO, chc.activeProtocols);
+            SSLExtension[] extTypes = chc.sslConfig.getExclusiveExtensions(
+                    SSLHandshake.CLIENT_HELLO, chc.activeProtocols,
+                    Arrays.asList(basicConfigurationExtensions));
             chm.extensions.produce(chc, extTypes);
 
+            // Is it still for session resumption?  TLS 1.3 session resumption
+            // may reset the session resumption status.
+            if (chc.isResumption && chc.resumingSession != null) {
+                // A special pre_shared_key extension producer is required to
+                // calculate the binders in the pre_shared_key extension.
+                //
+                // Note: the pre_shared_key extension MUST be the last extension.
+                if (maxProtocolVersion.useTLS13PlusSpec() &&
+                        extTypes[extTypes.length - 1] ==
+                                SSLExtension.CH_PRE_SHARED_KEY) {
+                    chm.extensions.reproduce(chc,
+                            new SSLExtension[] {
+                                    SSLExtension.CH_PRE_SHARED_KEY
+                            });
+                }
+            } else if (cachedSession != null) {
+                // Previously, session resumption was assumed.  Reset the
+                // the session ID filed in the ClientHello handshake message.
+                //
+                // Note: except pre_shared_key extension and session_ticket
+                // extension, no more depends on the ClientHello handshake
+                // message content.
+                if (maxProtocolVersion.useTLS13PlusSpec()) {
+                    sessionId = new SessionId(chc.sslContext.getSecureRandom());
+                } else {
+                    sessionId = new SessionId(new byte[0]);
+                }
+
+                chm.sessionId = sessionId;
+            }
+
+            // Well, now the handshake message is ready to use.
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine("Produced ClientHello handshake message", chm);
             }
@@ -675,6 +631,40 @@ final class ClientHello {
         }
     }
 
+    // Create the service ID per the ClientHello handshake message.
+    private static SessionId createServiceId(
+            ClientHelloMessage chm, String peerHost, int peerPort) {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException nsae) {
+            throw new RuntimeException(
+                    "MessageDigest algorithm SHA-256 is not available", nsae);
+        }
+
+        md.update(peerHost == null ? new byte[0] : peerHost.getBytes());
+        md.update(Utilities.toByteArray(peerPort));
+        md.update(chm.getEncodedCipherSuites());
+
+        HandshakeOutStream hos = new HandshakeOutStream(null);
+        try {
+            hos.putInt16(chm.clientVersion);
+            chm.extensions.send(hos);
+        } catch (IOException e) {
+            // unlikely, just ignore
+        }
+        md.update(hos.toByteArray());
+
+        return new SessionId(md.digest());
+    }
+
+    /**
+     * The "ClientHello" handshake message kick start producer.  Response to
+     * one of the following handshake message:
+     *     HelloRequest                     (SSL 3.0/TLS 1.0/1.1/1.2)
+     *     ServerHello(HelloRetryRequest)   (TLS 1.3)
+     *     HelloVerifyRequest               (DTLS 1.0/1.2)
+     */
     private static final
             class ClientHelloProducer implements HandshakeProducer {
         // Prevent instantiation of this class.
@@ -682,10 +672,6 @@ final class ClientHello {
             // blank
         }
 
-        // Response to one of the following handshake message:
-        //     HelloRequest                     (SSL 3.0/TLS 1.0/1.1/1.2)
-        //     ServerHello(HelloRetryRequest)   (TLS 1.3)
-        //     HelloVerifyRequest               (DTLS 1.0/1.2)
         @Override
         public byte[] produce(ConnectionContext context,
                 HandshakeMessage message) throws IOException {
@@ -969,105 +955,27 @@ final class ClientHello {
             }
 
             // Consume a Session Ticket Extension if it exists
+            shc.isResumption = true;    // For the check of session ticket.
             SSLExtension[] ext = new SSLExtension[]{
                     SSLExtension.CH_SESSION_TICKET
             };
             clientHello.extensions.consumeOnLoad(shc, ext);
-
-            // Does the client want to resume a session?
-            if (clientHello.sessionId.length() != 0 || shc.statelessResumption) {
-                SSLSessionContextImpl cache = (SSLSessionContextImpl)shc.sslContext
-                        .engineGetServerSessionContext();
-
-                SSLSessionImpl previous;
-                // Use the stateless session ticket if provided
-                if (shc.statelessResumption) {
-                    previous = shc.resumingSession;
-                } else {
-                    previous = cache.get(clientHello.sessionId.getId());
+            if (shc.isResumption && shc.resumingSession == null) {
+                // The SessionTicket extension is not available or cannot be
+                // used for session resumption.  Check if the session ID can
+                // be used instead.
+                if (!clientHello.sessionId.isEmpty()) {
+                    shc.resumingSession =
+                        (SSLSessionImpl)shc.sslContext.serverCache.getSession(
+                            clientHello.sessionId.getId());
                 }
+            }   // Otherwise, the SessionTicket extension is requested.
 
-                boolean resumingSession =
-                        (previous != null) && previous.isRejoinable();
-                if (!resumingSession) {
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                                "Can't resume, " +
-                                "the existing session is not rejoinable");
-                    }
-                }
-                // Validate the negotiated protocol version.
-                if (resumingSession) {
-                    ProtocolVersion sessionProtocol =
-                            previous.getProtocolVersion();
-                    if (sessionProtocol != shc.negotiatedProtocol) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, not the same protocol version");
-                        }
-                    }
-                }
-
-                // Validate the required client authentication.
-                if (resumingSession &&
-                    (shc.sslConfig.clientAuthType == CLIENT_AUTH_REQUIRED)) {
-                    try {
-                        previous.getPeerPrincipal();
-                    } catch (SSLPeerUnverifiedException e) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, " +
-                                "client authentication is required");
-                        }
-                    }
-                }
-
-                // Validate that the cached cipher suite.
-                if (resumingSession) {
-                    CipherSuite suite = previous.getSuite();
-                    if ((!shc.isNegotiable(suite)) ||
-                            (!clientHello.cipherSuites.contains(suite))) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, " +
-                                "the session cipher suite is absent");
-                        }
-                    }
-                }
-
-                // ensure that the endpoint identification algorithm matches the
-                // one in the session
-                String identityAlg = shc.sslConfig.identificationProtocol;
-                if (resumingSession && identityAlg != null) {
-                    String sessionIdentityAlg =
-                        previous.getIdentificationProtocol();
-                    if (!identityAlg.equalsIgnoreCase(sessionIdentityAlg)) {
-                        if (SSLLogger.isOn &&
-                        SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest("Can't resume, endpoint id" +
-                            " algorithm does not match, requested: " +
-                            identityAlg + ", cached: " + sessionIdentityAlg);
-                        }
-                        resumingSession = false;
-                    }
-                }
-
-                // So far so good.  Note that the handshake extensions may reset
-                // the resuming options later.
-                shc.isResumption = resumingSession;
-                shc.resumingSession = resumingSession ? previous : null;
-
-                if (!resumingSession && SSLLogger.isOn &&
-                        SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("Session not resumed.");
-                }
+            // Can the session be resumed?
+            if (shc.resumingSession == null ||
+                    ((ServerSession)shc.resumingSession).cannotResume(shc)) {
+                shc.isResumption = false;
+                shc.resumingSession = null;
             }
 
             // cache the client random number for further using
@@ -1076,7 +984,7 @@ final class ClientHello {
             // Check and launch ClientHello extensions.
             SSLExtension[] extTypes = shc.sslConfig.getExclusiveExtensions(
                     SSLHandshake.CLIENT_HELLO,
-                    Arrays.asList(SSLExtension.CH_SESSION_TICKET));
+                    Collections.singletonList(SSLExtension.CH_SESSION_TICKET));
             clientHello.extensions.consumeOnLoad(shc, extTypes);
 
             //
@@ -1149,6 +1057,19 @@ final class ClientHello {
                         "Received unexpected renegotiation handshake message");
             }
 
+            // [RFC 8446] When session resumption is the primary use case of
+            // PSKs, the most straightforward way to implement the PSK/cipher
+            // suite matching requirements is to negotiate the cipher suite
+            // first and then exclude any incompatible PSKs.
+            //
+            // Note: Please don't call handshakeHash.determine() here, in case
+            // of need of calculating pre-shared key binders.
+            shc.negotiatedCipherSuite = chooseCipherSuite(shc, clientHello);
+            if (shc.negotiatedCipherSuite == null) {
+                throw shc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                        "no cipher suites in common");
+            }
+
             // The client may send a dummy change_cipher_spec record
             // immediately after the first ClientHello.
             shc.conContext.consumers.putIfAbsent(
@@ -1181,12 +1102,65 @@ final class ClientHello {
                             SSLExtension.CH_SUPPORTED_VERSIONS));
             clientHello.extensions.consumeOnLoad(shc, extTypes);
 
+            shc.handshakeHash.determine(
+                    shc.negotiatedProtocol, shc.negotiatedCipherSuite);
+
             if (!shc.handshakeProducers.isEmpty()) {
                 // Should be HelloRetryRequest producer.
                 goHelloRetryRequest(shc, clientHello);
             } else {
                 goServerHello(shc, clientHello);
             }
+        }
+
+        // Choose the cipher suite for TLS 1.3 handshake.
+        private static CipherSuite chooseCipherSuite(
+                ServerHandshakeContext shc,
+                ClientHelloMessage clientHello) {
+            List<CipherSuite> preferred;
+            List<CipherSuite> proposed;
+            if (shc.sslConfig.preferLocalCipherSuites) {
+                preferred = shc.activeCipherSuites;
+                proposed = clientHello.cipherSuites;
+            } else {
+                preferred = clientHello.cipherSuites;
+                proposed = shc.activeCipherSuites;
+            }
+
+            CipherSuite legacySuite = null;
+            AlgorithmConstraints legacyConstraints =
+                    ServerHandshakeContext.legacyAlgorithmConstraints;
+            for (CipherSuite cs : preferred) {
+                if (!HandshakeContext.isNegotiable(
+                        proposed, shc.negotiatedProtocol, cs)) {
+                    continue;
+                }
+
+                if ((legacySuite == null) &&
+                        !legacyConstraints.permits(
+                                EnumSet.of(CryptoPrimitive.KEY_AGREEMENT),
+                                cs.name, null)) {
+                    legacySuite = cs;
+                    continue;
+                }
+
+                // The cipher suite has been negotiated.
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine("use cipher suite " + cs.name);
+                }
+                return cs;
+            }
+
+            if (legacySuite != null) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.warning(
+                            "use legacy cipher suite " + legacySuite.name);
+                }
+                return legacySuite;
+            }
+
+            // no cipher suites in common
+            return null;
         }
 
         private void goHelloRetryRequest(ServerHandshakeContext shc,
@@ -1303,86 +1277,28 @@ final class ClientHello {
                 }
             }
 
-
-            // Does the client want to resume a session?
-            if (clientHello.sessionId.length() != 0) {
-                SSLSessionContextImpl cache = (SSLSessionContextImpl)shc.sslContext
-                        .engineGetServerSessionContext();
-
-                // Consume a Session Ticket Extension if it exists
-                SSLExtension[] ext = new SSLExtension[]{
-                        SSLExtension.CH_SESSION_TICKET
-                };
-                clientHello.extensions.consumeOnLoad(shc, ext);
-
-                SSLSessionImpl previous;
-                // Use stateless session ticket if provided.
-                if (shc.statelessResumption) {
-                    previous = shc.resumingSession;
-                } else {
-                    previous = cache.get(clientHello.sessionId.getId());
+            // Consume a Session Ticket Extension if it exists
+            shc.isResumption = true;    // For the check of session ticket.
+            SSLExtension[] ext = new SSLExtension[] {
+                    SSLExtension.CH_SESSION_TICKET
+            };
+            clientHello.extensions.consumeOnLoad(shc, ext);
+            if (shc.isResumption && shc.resumingSession == null) {
+                // The SessionTicket extension is not available or cannot be
+                // used for session resumption.  Check if the session ID can
+                // be used instead.
+                if (!clientHello.sessionId.isEmpty()) {
+                    shc.resumingSession =
+                        (SSLSessionImpl)shc.sslContext.serverCache.getSession(
+                            clientHello.sessionId.getId());
                 }
+            }   // Otherwise, the SessionTicket extension is requested.
 
-                boolean resumingSession =
-                        (previous != null) && previous.isRejoinable();
-                if (!resumingSession) {
-                    if (SSLLogger.isOn &&
-                            SSLLogger.isOn("ssl,handshake,verbose")) {
-                        SSLLogger.finest(
-                            "Can't resume, " +
-                            "the existing session is not rejoinable");
-                    }
-                }
-                // Validate the negotiated protocol version.
-                if (resumingSession) {
-                    ProtocolVersion sessionProtocol =
-                            previous.getProtocolVersion();
-                    if (sessionProtocol != shc.negotiatedProtocol) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, not the same protocol version");
-                        }
-                    }
-                }
-
-                // Validate the required client authentication.
-                if (resumingSession &&
-                    (shc.sslConfig.clientAuthType == CLIENT_AUTH_REQUIRED)) {
-
-                    try {
-                        previous.getPeerPrincipal();
-                    } catch (SSLPeerUnverifiedException e) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, " +
-                                "client authentication is required");
-                        }
-                    }
-                }
-
-                // Validate that the cached cipher suite.
-                if (resumingSession) {
-                    CipherSuite suite = previous.getSuite();
-                    if ((!shc.isNegotiable(suite)) ||
-                            (!clientHello.cipherSuites.contains(suite))) {
-                        resumingSession = false;
-                        if (SSLLogger.isOn &&
-                                SSLLogger.isOn("ssl,handshake,verbose")) {
-                            SSLLogger.finest(
-                                "Can't resume, " +
-                                "the session cipher suite is absent");
-                        }
-                    }
-                }
-
-                // So far so good.  Note that the handshake extensions may reset
-                // the resuming options later.
-                shc.isResumption = resumingSession;
-                shc.resumingSession = resumingSession ? previous : null;
+            // Can the session be resumed?
+            if (shc.resumingSession == null ||
+                    ((ServerSession)shc.resumingSession).cannotResume(shc)) {
+                shc.isResumption = false;
+                shc.resumingSession = null;
             }
 
             HelloCookieManager hcm =

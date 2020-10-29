@@ -60,7 +60,7 @@ final class SSLExtensions {
             int extId = Record.getInt16(m);
             int extLen = Record.getInt16(m);
             if (extLen > m.remaining()) {
-                throw hm.handshakeContext.conContext.fatal(
+                throw hm.transportContext.fatal(
                         Alert.ILLEGAL_PARAMETER,
                         "Error parsing extension (" + extId +
                         "): no sufficient data");
@@ -87,7 +87,7 @@ final class SSLExtensions {
                                 "in the ServerHello handshake message");
                     }
                 } else if (handshakeType == SSLHandshake.SERVER_HELLO) {
-                    throw hm.handshakeContext.conContext.fatal(
+                    throw hm.transportContext.fatal(
                             Alert.UNSUPPORTED_EXTENSION, "extension (" +
                                     extId + ") should not be presented in " +
                                     handshakeType.name);
@@ -106,7 +106,7 @@ final class SSLExtensions {
                     }
 
                     if (extension.handshakeType != handshakeType) {
-                        throw hm.handshakeContext.conContext.fatal(
+                        throw hm.transportContext.fatal(
                                 Alert.UNSUPPORTED_EXTENSION,
                                 "extension (" + extId + ") should not be " +
                                 "presented in " + handshakeType.name);
@@ -346,7 +346,7 @@ final class SSLExtensions {
                     }
                     if (ext != null) {
                         builder.append(
-                            ext.toString(handshakeMessage.handshakeContext,
+                            ext.toString(handshakeMessage.transportContext,
                                     ByteBuffer.wrap(en.getValue())));
                     } else {
                         builder.append(toString(en.getKey(), en.getValue()));
@@ -360,7 +360,7 @@ final class SSLExtensions {
                         builder.append(",\n");
                     }
                     builder.append(
-                        en.getKey().toString(handshakeMessage.handshakeContext,
+                        en.getKey().toString(handshakeMessage.transportContext,
                                 ByteBuffer.wrap(en.getValue())));
                 }
 

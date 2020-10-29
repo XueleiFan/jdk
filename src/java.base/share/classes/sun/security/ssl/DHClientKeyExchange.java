@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -70,11 +70,11 @@ final class DHClientKeyExchange {
         private byte[] y;        // 1 to 2^16 - 1 bytes
 
         DHClientKeyExchangeMessage(
-                HandshakeContext handshakeContext) throws IOException {
-            super(handshakeContext);
+                HandshakeContext hc) throws IOException {
+            super(hc.conContext);
             // This happens in client side only.
             ClientHandshakeContext chc =
-                    (ClientHandshakeContext)handshakeContext;
+                    (ClientHandshakeContext)hc;
 
             DHEPossession dhePossession = null;
             for (SSLPossession possession : chc.handshakePossessions) {
@@ -95,12 +95,12 @@ final class DHClientKeyExchange {
             this.y = Utilities.toByteArray(publicKey.getY());
         }
 
-        DHClientKeyExchangeMessage(HandshakeContext handshakeContext,
+        DHClientKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
             // This happens in server side only.
             ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+                    (ServerHandshakeContext)hc;
 
             if (m.remaining() < 3) {
                 throw shc.conContext.fatal(Alert.HANDSHAKE_FAILURE,

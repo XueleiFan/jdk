@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,15 +42,15 @@ final class ServerHelloDone {
      * The ServerHelloDone handshake message.
      */
     static final class ServerHelloDoneMessage extends HandshakeMessage {
-        ServerHelloDoneMessage(HandshakeContext handshakeContext) {
-            super(handshakeContext);
+        ServerHelloDoneMessage(HandshakeContext hc) {
+            super(hc.conContext);
         }
 
-        ServerHelloDoneMessage(HandshakeContext handshakeContext,
+        ServerHelloDoneMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
             if (m.hasRemaining()) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Error parsing ServerHelloDone message: not empty");
             }
         }

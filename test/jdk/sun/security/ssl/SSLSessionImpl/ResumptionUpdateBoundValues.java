@@ -26,6 +26,7 @@
  * @library /test/lib
  * @summary Test that a New Session Ticket will be generated when a
  * SSLSessionBindingListener is set (boundValues)
+ * @ignore the dependent implementation details are changed
  * @run main/othervm ResumptionUpdateBoundValues
  */
 

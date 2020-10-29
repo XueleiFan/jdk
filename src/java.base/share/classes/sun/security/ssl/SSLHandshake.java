@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2006, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -115,17 +115,17 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
     NEW_SESSION_TICKET          ((byte)0x04, "new_session_ticket",
         (Map.Entry<SSLConsumer, ProtocolVersion[]>[])(new Map.Entry[] {
             new SimpleImmutableEntry<SSLConsumer, ProtocolVersion[]>(
-                 NewSessionTicket.handshake12Consumer,
+                 NewSessionTicket.t12HandshakeConsumer,
                  ProtocolVersion.PROTOCOLS_TO_12
             ),
             new SimpleImmutableEntry<SSLConsumer, ProtocolVersion[]>(
-                 NewSessionTicket.handshakeConsumer,
+                 NewSessionTicket.t13HandshakeConsumer,
                  ProtocolVersion.PROTOCOLS_OF_13
             )
         }),
         (Map.Entry<HandshakeProducer, ProtocolVersion[]>[])(new Map.Entry[] {
             new SimpleImmutableEntry<HandshakeProducer, ProtocolVersion[]>(
-                 NewSessionTicket.handshake12Producer,
+                 NewSessionTicket.t12HandshakeProducer,
                  ProtocolVersion.PROTOCOLS_TO_12
             )
         })),
@@ -334,18 +334,18 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     KEY_UPDATE                  ((byte)0x18, "key_update",
-            (Map.Entry<SSLConsumer, ProtocolVersion[]>[])(new Map.Entry[] {
-                    new SimpleImmutableEntry<SSLConsumer, ProtocolVersion[]>(
-                            KeyUpdate.handshakeConsumer,
-                            ProtocolVersion.PROTOCOLS_OF_13
-                    )
-            }),
-            (Map.Entry<HandshakeProducer, ProtocolVersion[]>[])(new Map.Entry[] {
-                    new SimpleImmutableEntry<HandshakeProducer, ProtocolVersion[]>(
-                            KeyUpdate.handshakeProducer,
-                            ProtocolVersion.PROTOCOLS_OF_13
-                    )
-            })),
+        (Map.Entry<SSLConsumer, ProtocolVersion[]>[])(new Map.Entry[] {
+            new SimpleImmutableEntry<SSLConsumer, ProtocolVersion[]>(
+                KeyUpdate.handshakeConsumer,
+                ProtocolVersion.PROTOCOLS_OF_13
+            )
+        }),
+        (Map.Entry<HandshakeProducer, ProtocolVersion[]>[])(new Map.Entry[] {
+            new SimpleImmutableEntry<HandshakeProducer, ProtocolVersion[]>(
+                null,       // kickstart producer should be used instead.
+                ProtocolVersion.PROTOCOLS_OF_13
+            )
+        })),
     MESSAGE_HASH                ((byte)0xFE, "message_hash"),
     NOT_APPLICABLE              ((byte)0xFF, "not_applicable");
 
@@ -406,18 +406,24 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
         }
 
         // The consuming happens in handshake context only.
-        HandshakeContext hc = (HandshakeContext)context;
         ProtocolVersion protocolVersion;
-        if ((hc.negotiatedProtocol == null) ||
-                (hc.negotiatedProtocol == ProtocolVersion.NONE)) {
-            if (hc.conContext.isNegotiated &&
-                    hc.conContext.protocolVersion != ProtocolVersion.NONE) {
-                protocolVersion = hc.conContext.protocolVersion;
+        if (context instanceof HandshakeContext) {
+            HandshakeContext hc = (HandshakeContext)context;
+            if ((hc.negotiatedProtocol == null) ||
+                    (hc.negotiatedProtocol == ProtocolVersion.NONE)) {
+                if (hc.conContext.isNegotiated &&
+                        hc.conContext.protocolVersion != ProtocolVersion.NONE) {
+                    protocolVersion = hc.conContext.protocolVersion;
+                } else {
+                    protocolVersion = hc.maximumActiveProtocol;
+                }
             } else {
-                protocolVersion = hc.maximumActiveProtocol;
+                protocolVersion = hc.negotiatedProtocol;
             }
-        } else {
-            protocolVersion = hc.negotiatedProtocol;
+        } else {    // post-handshake
+            // Use the max protocol version for now.  May need to update if
+            // TLS 1.4 use different post-handshake messages.
+            protocolVersion = ((TransportContext)context).protocolVersion;
         }
 
         for (Map.Entry<SSLConsumer,
@@ -507,7 +513,18 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
         return false;
     }
 
-    static final void kickstart(HandshakeContext context) throws IOException {
+    static boolean isConsumable(byte id) {
+        for (SSLHandshake hs : SSLHandshake.values()) {
+            if (hs.id == id && id != NOT_APPLICABLE.id &&
+                    hs.handshakeConsumers.length != 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static final void kickstart(ConnectionContext context) throws IOException {
         if (context instanceof ClientHandshakeContext) {
             // For initial handshaking, including session resumption,
             // ClientHello message is used as the kickstart message.
@@ -518,8 +535,9 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
             //
             // (D)TLS 1.3 forbids renegotiation.  The post-handshake KeyUpdate
             // message is used to update the sending cryptographic keys.
-            if (context.conContext.isNegotiated &&
-                    context.conContext.protocolVersion.useTLS13PlusSpec()) {
+            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+            if (chc.conContext.isNegotiated &&
+                    chc.conContext.protocolVersion.useTLS13PlusSpec()) {
                 // Use KeyUpdate message for renegotiation.
                 KeyUpdate.kickstartProducer.produce(context);
             } else {
@@ -528,33 +546,40 @@ enum SSLHandshake implements SSLConsumer, HandshakeProducer {
                 // SSLHandshake.CLIENT_HELLO.produce(context);
                 ClientHello.kickstartProducer.produce(context);
             }
-        } else {
+        } else if (context instanceof ServerHandshakeContext) {
             // The server side can delivering kickstart message after the
             // connection has established.
             //
             // (D)TLS 1.2 and older protocols use HelloRequest to begin a
             // negotiation process anew.
-            //
-            // While (D)TLS 1.3 uses the post-handshake KeyUpdate message
-            // to update the sending cryptographic keys.
-            if (context.conContext.protocolVersion.useTLS13PlusSpec()) {
-                // Use KeyUpdate message for renegotiation.
-                KeyUpdate.kickstartProducer.produce(context);
-            } else {
-                // SSLHandshake.HELLO_REQUEST.produce(context);
+            ServerHandshakeContext shc = (ServerHandshakeContext)context;
+            if (!shc.conContext.protocolVersion.useTLS13PlusSpec()) {
                 HelloRequest.kickstartProducer.produce(context);
             }
+        } else if (context instanceof TransportContext) {
+            // The server side can delivering kickstart message after the
+            // connection has established.
+            //
+            // (D)TLS 1.3 uses the post-handshake KeyUpdate message to
+            // update the sending cryptographic keys.
+            TransportContext tc = (TransportContext)context;
+            if (tc.protocolVersion.useTLS13PlusSpec()) {
+                // Use KeyUpdate message for renegotiation.
+                KeyUpdate.kickstartProducer.produce(context);
+            }
         }
+
+        // Otherwise, no action.
     }
 
     /**
      * A (transparent) specification of handshake message.
      */
     static abstract class HandshakeMessage {
-        final HandshakeContext      handshakeContext;
+        final TransportContext      transportContext;
 
-        HandshakeMessage(HandshakeContext handshakeContext) {
-            this.handshakeContext = handshakeContext;
+        HandshakeMessage(TransportContext transportContext) {
+            this.transportContext = transportContext;
         }
 
         abstract SSLHandshake handshakeType();

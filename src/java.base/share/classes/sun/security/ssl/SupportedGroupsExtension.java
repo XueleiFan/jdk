@@ -80,23 +80,23 @@ final class SupportedGroupsExtension {
             }
         }
 
-        private SupportedGroupsSpec(HandshakeContext hc,
+        private SupportedGroupsSpec(TransportContext tc,
                 ByteBuffer m) throws IOException  {
             if (m.remaining() < 2) {      // 2: the length of the list
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_groups extension: insufficient data"));
             }
 
             byte[] ngs = Record.getBytes16(m);
             if (m.hasRemaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_groups extension: unknown extra data"));
             }
 
             if ((ngs == null) || (ngs.length == 0) || (ngs.length % 2 != 0)) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_groups extension: incomplete data"));
             }
@@ -112,7 +112,7 @@ final class SupportedGroupsExtension {
         @Override
         public String toString() {
             MessageFormat messageFormat = new MessageFormat(
-                "\"versions\": '['{0}']'", Locale.ENGLISH);
+                "\"named groups\": '['{0}']'", Locale.ENGLISH);
 
             if (namedGroupsIds == null || namedGroupsIds.length == 0) {
                 Object[] messageFields = {
@@ -144,9 +144,9 @@ final class SupportedGroupsExtension {
     private static final
             class SupportedGroupsStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SupportedGroupsSpec(hc, buffer)).toString();
+                return (new SupportedGroupsSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -420,7 +420,8 @@ final class SupportedGroupsExtension {
             }
 
             // Parse the extension.
-            SupportedGroupsSpec spec = new SupportedGroupsSpec(shc, buffer);
+            SupportedGroupsSpec spec =
+                    new SupportedGroupsSpec(shc.conContext, buffer);
 
             // Update the context.
             List<NamedGroup> knownNamedGroups = new LinkedList<>();
@@ -565,7 +566,8 @@ final class SupportedGroupsExtension {
             }
 
             // Parse the extension.
-            SupportedGroupsSpec spec = new SupportedGroupsSpec(chc, buffer);
+            SupportedGroupsSpec spec =
+                    new SupportedGroupsSpec(chc.conContext, buffer);
 
             // Update the context.
             List<NamedGroup> knownNamedGroups =

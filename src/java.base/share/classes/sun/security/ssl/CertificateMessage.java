@@ -103,7 +103,7 @@ final class CertificateMessage {
 
         T12CertificateMessage(HandshakeContext handshakeContext,
                 X509Certificate[] certChain) throws SSLException {
-            super(handshakeContext);
+            super(handshakeContext.conContext);
 
             List<byte[]> encodedCerts = new ArrayList<>(certChain.length);
             for (X509Certificate cert : certChain) {
@@ -123,7 +123,7 @@ final class CertificateMessage {
 
         T12CertificateMessage(HandshakeContext handshakeContext,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(handshakeContext.conContext);
 
             int listLen = Record.getInt24(m);
             if (listLen > m.remaining()) {
@@ -136,8 +136,8 @@ final class CertificateMessage {
                 while (listLen > 0) {
                     byte[] encodedCert = Record.getBytes24(m);
                     listLen -= (3 + encodedCert.length);
-                    encodedCerts.add(encodedCert);
-                    if (encodedCerts.size() > SSLConfiguration.maxCertificateChainLength) {
+                    if (encodedCerts.size() >
+                          SSLConfiguration.maxCertificateChainLength) {
                         throw new SSLProtocolException(
                                 "The certificate chain length ("
                                 + encodedCerts.size()
@@ -145,7 +145,6 @@ final class CertificateMessage {
                                 + SSLConfiguration.maxCertificateChainLength
                                 + ")");
                     }
-
                 }
                 this.encodedCertChain = encodedCerts;
             } else {
@@ -262,9 +261,7 @@ final class CertificateMessage {
                     "No expected X.509 certificate for server authentication");
             }
 
-            shc.handshakeSession.setLocalPrivateKey(
-                    x509Possession.popPrivateKey);
-            shc.handshakeSession.setLocalCertificates(x509Possession.popCerts);
+            shc.handshakeSession.setLocalPrivateKey(x509Possession);
             T12CertificateMessage cm =
                     new T12CertificateMessage(shc, x509Possession.popCerts);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
@@ -301,8 +298,8 @@ final class CertificateMessage {
                             "use empty Certificate message instead");
                     }
 
-                    x509Possession =
-                            new X509Possession(null, new X509Certificate[0]);
+                    x509Possession = new X509Possession(
+                            null, new X509Certificate[0], "");
                 } else {
                     if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                         SSLLogger.fine(
@@ -315,15 +312,7 @@ final class CertificateMessage {
                 }
             }
 
-            chc.handshakeSession.setLocalPrivateKey(
-                    x509Possession.popPrivateKey);
-            if (x509Possession.popCerts != null &&
-                    x509Possession.popCerts.length != 0) {
-                chc.handshakeSession.setLocalCertificates(
-                        x509Possession.popCerts);
-            } else {
-                chc.handshakeSession.setLocalCertificates(null);
-            }
+            chc.handshakeSession.setLocalPrivateKey(x509Possession);
             T12CertificateMessage cm =
                     new T12CertificateMessage(chc, x509Possession.popCerts);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
@@ -444,20 +433,23 @@ final class CertificateMessage {
             // renegotiation after a session-resumption abbreviated
             // initial handshake?
             //
-            // DO NOT need to check allowUnsafeServerCertChange here. We only
-            // reserve server certificates when allowUnsafeServerCertChange is
-            // false.
-            if (chc.reservedServerCerts != null &&
-                    !chc.handshakeSession.useExtendedMasterSecret) {
-                // It is not necessary to check the certificate update if
-                // endpoint identification is enabled.
+            // Need not to check allowUnsafeServerCertChange here. We only
+            // reserve server certificates when allowUnsafeServerCertChange
+            // is false.
+            //
+            // It is not necessary to check the certificate update if
+            // endpoint identification is enabled.
+            if (chc.conContext.isNegotiated &&
+                    !chc.handshakeSession.useExtendedMasterSecret &&
+                    chc.conContext.reservedServerCert != null) {
                 String identityAlg = chc.sslConfig.identificationProtocol;
                 if ((identityAlg == null || identityAlg.isEmpty()) &&
                         !isIdentityEquivalent(x509Certs[0],
-                                chc.reservedServerCerts[0])) {
+                                chc.conContext.reservedServerCert)) {
+
                     throw chc.conContext.fatal(Alert.BAD_CERTIFICATE,
                             "server certificate change is restricted " +
-                            "during renegotiation");
+                                    "during renegotiation");
                 }
             }
 
@@ -802,10 +794,10 @@ final class CertificateMessage {
         private final byte[] requestContext;
         private final List<CertificateEntry> certEntries;
 
-        T13CertificateMessage(HandshakeContext context,
+        T13CertificateMessage(HandshakeContext hc,
                 byte[] requestContext, X509Certificate[] certificates)
                 throws SSLException, CertificateException  {
-            super(context);
+            super(hc.conContext);
 
             this.requestContext = requestContext.clone();
             this.certEntries = new LinkedList<>();
@@ -816,17 +808,17 @@ final class CertificateMessage {
             }
         }
 
-        T13CertificateMessage(HandshakeContext handshakeContext,
+        T13CertificateMessage(HandshakeContext hc,
                 byte[] requestContext, List<CertificateEntry> certificates) {
-            super(handshakeContext);
+            super(hc.conContext);
 
             this.requestContext = requestContext.clone();
             this.certEntries = certificates;
         }
 
-        T13CertificateMessage(HandshakeContext handshakeContext,
+        T13CertificateMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // struct {
             //      opaque certificate_request_context<0..2^8-1>;
@@ -854,7 +846,7 @@ final class CertificateMessage {
             }
 
             SSLExtension[] enabledExtensions =
-                handshakeContext.sslConfig.getEnabledExtensions(
+                hc.sslConfig.getEnabledExtensions(
                         SSLHandshake.CERTIFICATE);
             List<CertificateEntry> certList = new LinkedList<>();
             while (m.hasRemaining()) {
@@ -868,7 +860,8 @@ final class CertificateMessage {
                 SSLExtensions extensions =
                         new SSLExtensions(this, m, enabledExtensions);
                 certList.add(new CertificateEntry(encodedCert, extensions));
-                if (certList.size() > SSLConfiguration.maxCertificateChainLength) {
+                if (certList.size() >
+                        SSLConfiguration.maxCertificateChainLength) {
                     throw new SSLProtocolException(
                             "The certificate chain length ("
                             + certList.size()
@@ -987,9 +980,7 @@ final class CertificateMessage {
 
             // update the context
             shc.handshakePossessions.add(x509Possession);
-            shc.handshakeSession.setLocalPrivateKey(
-                    x509Possession.popPrivateKey);
-            shc.handshakeSession.setLocalCertificates(localCerts);
+            shc.handshakeSession.setLocalPrivateKey(x509Possession);
             T13CertificateMessage cm;
             try {
                 cm = new T13CertificateMessage(shc, (new byte[0]), localCerts);
@@ -1117,15 +1108,8 @@ final class CertificateMessage {
                 } else {
                     X509Possession x509Possession = (X509Possession)pos;
                     localCerts = x509Possession.popCerts;
-                    chc.handshakeSession.setLocalPrivateKey(
-                            x509Possession.popPrivateKey);
+                    chc.handshakeSession.setLocalPrivateKey(x509Possession);
                 }
-            }
-
-            if (localCerts != null && localCerts.length != 0) {
-                chc.handshakeSession.setLocalCertificates(localCerts);
-            } else {
-                chc.handshakeSession.setLocalCertificates(null);
             }
 
             T13CertificateMessage cm;

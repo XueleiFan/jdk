@@ -63,11 +63,11 @@ public class CookieExtension {
     static class CookieSpec implements SSLExtensionSpec {
         final byte[] cookie;
 
-        private CookieSpec(HandshakeContext hc,
+        private CookieSpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
             // opaque cookie<1..2^16-1>;
             if (m.remaining() < 3) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid cookie extension: insufficient data"));
             }
@@ -92,9 +92,9 @@ public class CookieExtension {
 
     private static final class CookieStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CookieSpec(hc, buffer)).toString();
+                return (new CookieSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -161,7 +161,7 @@ public class CookieExtension {
                 return;     // ignore the extension
             }
 
-            CookieSpec spec = new CookieSpec(shc, buffer);
+            CookieSpec spec = new CookieSpec(shc.conContext, buffer);
             shc.handshakeExtensions.put(SSLExtension.CH_COOKIE, spec);
 
             // No impact on session resumption.
@@ -260,7 +260,7 @@ public class CookieExtension {
                 return;     // ignore the extension
             }
 
-            CookieSpec spec = new CookieSpec(chc, buffer);
+            CookieSpec spec = new CookieSpec(chc.conContext, buffer);
             chc.handshakeExtensions.put(SSLExtension.HRR_COOKIE, spec);
         }
     }

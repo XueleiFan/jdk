@@ -24,36 +24,25 @@
  */
 package sun.security.ssl;
 
+import sun.security.ssl.NewSessionTicket.SessionTicket;
+import sun.security.ssl.NewSessionTicket.T13SessionTicket;
+import sun.security.ssl.ServerNameExtension.CHServerNamesSpec.UnknownServerName;
+import sun.security.util.Cache;
 import sun.security.x509.X509CertImpl;
 
-import java.io.IOException;
-import java.math.BigInteger;
-import java.net.InetAddress;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.security.Principal;
 import java.security.PrivateKey;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Queue;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.ReentrantLock;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
-import javax.net.ssl.ExtendedSSLSession;
-import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SNIServerName;
-import javax.net.ssl.SSLException;
-import javax.net.ssl.SSLPeerUnverifiedException;
-import javax.net.ssl.SSLPermission;
-import javax.net.ssl.SSLSessionBindingEvent;
-import javax.net.ssl.SSLSessionBindingListener;
-import javax.net.ssl.SSLSessionContext;
+import javax.net.ssl.*;
 
 /**
  * Implements the SSL session interface, and exposes the session context
@@ -67,115 +56,108 @@ import javax.net.ssl.SSLSessionContext;
  * until memory is low enough that the runtime environment purges cache
  * entries automatically to reclaim space.
  *
- * <P><em> The only reason this class is not package-private is that
- * there's no other public way to get at the server session context which
- * is associated with any given authentication context. </em>
- *
  * @author David Brownell
  */
-final class SSLSessionImpl extends ExtendedSSLSession {
+abstract class SSLSessionImpl extends ExtendedSSLSession {
+    // The context in which this session is bound.
+    protected SSLSessionContextImpl         sessionContext;
+    private final SSLContextImpl            sslContext;
+
+    protected final ReentrantLock           sessionLock = new ReentrantLock();
+
+    // The final states of the session.
+    protected final ProtocolVersion         protocolVersion;
+
+    // The
+    protected final SessionId               sessionId;
+    private final long                      creationTime;
+    private final String                    host;
+    private final int                       port;
+
+    // could be final if not for serialization.
+    SNIServerName                           serverNameIndication;
+    final List<SNIServerName>               requestedServerNames;
+
+    protected final String                  identificationProtocol;
+    final boolean                           useExtendedMasterSecret;
+
+    // Could be final if not for serialization.  Please don't update this field.
+    protected final Collection<SignatureScheme> localSupportedSignAlgs;
+
+    // Mutable states of the session.
+    protected X509Certificate[]             peerCerts;
+    protected CipherSuite                   cipherSuite;
+    protected SecretKey                     masterSecret;   // TLS 1.2 and prior
+    private long                            lastUsedTime = 0;
+    private boolean                         invalidated;
+    String                                  localPrivateKeyAlias;
+    Collection<SignatureScheme>             peerSupportedSignAlgs;
+    boolean                                 useDefaultPeerSignAlgs = false;
+
+    int                                     negotiatedMaxFragLen = -1;
+    final int                               maximumPacketSize;
+
+    /**
+     * Use large packet sizes now or follow RFC 2246 packet sizes (2^14)
+     * until changed.
+     * <p>
+     * In the TLS specification (section 6.2.1, RFC2246), it is not
+     * recommended that the plaintext has more than 2^14 bytes.
+     * However, some TLS implementations violate the specification.
+     * This is a workaround for interoperability with these stacks.
+     * <p>
+     * Application could accept large fragments up to 2^15 bytes by
+     * setting the system property jsse.SSLEngine.acceptLargeFragments
+     * to "true".
+     */
+    // Note: this System property is not respected in the implementation.
+    // Maybe, the System property can be retired and large fragments are
+    // not allowed any longer.
+    // private static final boolean            acceptLargeFragments =
+    private boolean                         acceptLargeFragments =
+            Utilities.getBooleanProperty(
+                    "jsse.SSLEngine.acceptLargeFragments", false);
 
     /*
-     * The state of a single session, as described in section 7.1
-     * of the SSLv3 spec.
+     * Table of application-specific session data indexed by an application
+     * key and the calling security context. This is important since
+     * sessions can be shared across different protection domains.
      */
-    private final ProtocolVersion       protocolVersion;
-    private final SessionId             sessionId;
-    private X509Certificate[]   peerCerts;
-    private CipherSuite         cipherSuite;
-    private SecretKey           masterSecret;
-    final boolean               useExtendedMasterSecret;
-
-    /*
-     * Information not part of the SSLv3 protocol spec, but used
-     * to support session management policies.
-     */
-    private final long          creationTime;
-    private long                lastUsedTime = 0;
-    private final String        host;
-    private final int           port;
-    private SSLSessionContextImpl       context;
-    private boolean             invalidated;
-    private X509Certificate[]   localCerts;
-    private PrivateKey          localPrivateKey;
-    private final Collection<SignatureScheme>     localSupportedSignAlgs;
-    private Collection<SignatureScheme> peerSupportedSignAlgs; //for certificate
-    private boolean             useDefaultPeerSignAlgs = false;
-    private List<byte[]>        statusResponses;
-    private SecretKey           resumptionMasterSecret;
-    private SecretKey           preSharedKey;
-    private byte[]              pskIdentity;
-    private final long          ticketCreationTime = System.currentTimeMillis();
-    private int                 ticketAgeAdd;
-
-    private int                 negotiatedMaxFragLen = -1;
-    private int                 maximumPacketSize;
-
-    private final Queue<SSLSessionImpl> childSessions =
-                                        new ConcurrentLinkedQueue<>();
-
-    /*
-     * Is the session currently re-established with a session-resumption
-     * abbreviated initial handshake?
-     *
-     * Note that currently we only set this variable in client side.
-     */
-    private boolean isSessionResumption = false;
-
-    /*
-     * Use of session caches is globally enabled/disabled.
-     */
-    private static boolean      defaultRejoinable = true;
-
-    // server name indication
-    final SNIServerName         serverNameIndication;
-    private final List<SNIServerName>    requestedServerNames;
-
-    // Counter used to create unique nonces in NewSessionTicket
-    private BigInteger ticketNonceCounter = BigInteger.ONE;
-
-    // The endpoint identification algorithm used to check certificates
-    // in this session.
-    private final String        identificationProtocol;
-
-    private final ReentrantLock sessionLock = new ReentrantLock();
+    private final ConcurrentHashMap<SecureKey, Object> boundValues;
 
     /*
      * Create a new non-rejoinable session, using the default (null)
-     * cipher spec.  This constructor returns a session which could
-     * be used either by a client or by a server, as a connection is
-     * first opened and before handshaking begins.
+     * cipher spec.
      */
-    SSLSessionImpl() {
+    static SSLSessionImpl initialSessionFor(
+            SSLContextImpl sslContext, SSLConfiguration sslConfig) {
+        if (sslConfig.isClientMode) {
+            return new ClientSession(sslContext);
+        } else {
+            return new ServerSession(sslContext);
+        }
+    }
+
+    /*
+     * Create a new non-rejoinable session, using the default (null)
+     * cipher spec.
+     */
+    private SSLSessionImpl(SSLContextImpl sslContext) {
+        this.sslContext = sslContext;
         this.protocolVersion = ProtocolVersion.NONE;
         this.cipherSuite = CipherSuite.C_NULL;
-        this.sessionId = new SessionId(false, null);
+        this.sessionId = new SessionId(new byte[0]);
         this.host = null;
         this.port = -1;
+        this.maximumPacketSize = 0;     // please reset it explicitly later.
         this.localSupportedSignAlgs = Collections.emptySet();
+        this.peerSupportedSignAlgs = Collections.emptySet();
         this.serverNameIndication = null;
-        this.requestedServerNames = Collections.<SNIServerName>emptyList();
+        this.requestedServerNames = Collections.emptyList();
         this.useExtendedMasterSecret = false;
         this.creationTime = System.currentTimeMillis();
         this.identificationProtocol = null;
         this.boundValues = new ConcurrentHashMap<>();
-    }
-
-    /*
-     * Create a new session, using a given cipher spec.  This will
-     * be rejoinable if session caching is enabled; the constructor
-     * is intended mostly for use by serves.
-     */
-    SSLSessionImpl(HandshakeContext hc, CipherSuite cipherSuite) {
-        this(hc, cipherSuite,
-            new SessionId(defaultRejoinable, hc.sslContext.getSecureRandom()));
-    }
-
-    /*
-     * Record a new session, using a given cipher spec and session ID.
-     */
-    SSLSessionImpl(HandshakeContext hc, CipherSuite cipherSuite, SessionId id) {
-        this(hc, cipherSuite, id, System.currentTimeMillis());
     }
 
     /*
@@ -186,346 +168,120 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * unmodifiable collections that can cause StackOverflowErrors
      * (see JDK-6323374).
      */
-    SSLSessionImpl(HandshakeContext hc,
-            CipherSuite cipherSuite, SessionId id, long creationTime) {
+    private SSLSessionImpl(HandshakeContext hc,
+                   CipherSuite cipherSuite, SessionId id, long creationTime) {
+        this.sslContext = hc.sslContext;
         this.protocolVersion = hc.negotiatedProtocol;
         this.cipherSuite = cipherSuite;
         this.sessionId = id;
         this.host = hc.conContext.transport.getPeerHost();
         this.port = hc.conContext.transport.getPeerPort();
+        this.maximumPacketSize = hc.sslConfig.maximumPacketSize;
         this.localSupportedSignAlgs = hc.localSupportedSignAlgs == null ?
                 Collections.emptySet() :
                 Collections.unmodifiableCollection(
                         new ArrayList<>(hc.localSupportedSignAlgs));
+        this.peerSupportedSignAlgs = Collections.emptySet();
         this.serverNameIndication = hc.negotiatedServerName;
-        this.requestedServerNames = Collections.unmodifiableList(
-                new ArrayList<>(hc.getRequestedServerNames()));
+        this.requestedServerNames = List.copyOf(hc.getRequestedServerNames());
+
         if (hc.sslConfig.isClientMode) {
             this.useExtendedMasterSecret =
-                (hc.handshakeExtensions.get(
-                        SSLExtension.CH_EXTENDED_MASTER_SECRET) != null) &&
-                (hc.handshakeExtensions.get(
-                        SSLExtension.SH_EXTENDED_MASTER_SECRET) != null);
+                    (hc.handshakeExtensions.get(
+                            SSLExtension.CH_EXTENDED_MASTER_SECRET) != null) &&
+                    (hc.handshakeExtensions.get(
+                            SSLExtension.SH_EXTENDED_MASTER_SECRET) != null);
         } else {
             this.useExtendedMasterSecret =
-                (hc.handshakeExtensions.get(
-                        SSLExtension.CH_EXTENDED_MASTER_SECRET) != null) &&
-                (!hc.negotiatedProtocol.useTLS13PlusSpec());
+                    (hc.handshakeExtensions.get(
+                            SSLExtension.CH_EXTENDED_MASTER_SECRET) != null) &&
+                    (!hc.negotiatedProtocol.useTLS13PlusSpec());
         }
+
         this.creationTime = creationTime;
         this.identificationProtocol = hc.sslConfig.identificationProtocol;
         this.boundValues = new ConcurrentHashMap<>();
 
         if (SSLLogger.isOn && SSLLogger.isOn("session")) {
-             SSLLogger.finest("Session initialized:  " + this);
+            SSLLogger.finest("Session initialized:  " + this);
         }
     }
 
-    SSLSessionImpl(SSLSessionImpl baseSession, SessionId newId) {
-        this.protocolVersion = baseSession.getProtocolVersion();
-        this.cipherSuite = baseSession.cipherSuite;
-        this.sessionId = newId;
-        this.host = baseSession.getPeerHost();
-        this.port = baseSession.getPeerPort();
-        this.localSupportedSignAlgs =
-                baseSession.localSupportedSignAlgs == null ?
-                Collections.emptySet() : baseSession.localSupportedSignAlgs;
-        this.peerSupportedSignAlgs =
-                baseSession.peerSupportedSignAlgs == null ?
-                Collections.emptySet() : baseSession.peerSupportedSignAlgs;
-        this.serverNameIndication = baseSession.serverNameIndication;
-        this.requestedServerNames = baseSession.getRequestedServerNames();
-        this.masterSecret = baseSession.getMasterSecret();
-        this.useExtendedMasterSecret = baseSession.useExtendedMasterSecret;
-        this.creationTime = baseSession.getCreationTime();
-        this.lastUsedTime = System.currentTimeMillis();
-        this.identificationProtocol = baseSession.getIdentificationProtocol();
-        this.localCerts = baseSession.localCerts;
-        this.peerCerts = baseSession.peerCerts;
-        this.statusResponses = baseSession.statusResponses;
-        this.resumptionMasterSecret = baseSession.resumptionMasterSecret;
-        this.context = baseSession.context;
-        this.negotiatedMaxFragLen = baseSession.negotiatedMaxFragLen;
-        this.maximumPacketSize = baseSession.maximumPacketSize;
-        this.boundValues = baseSession.boundValues;
+    private SSLSessionImpl(
+            HandshakeContext hc,
+            SessionEncoder proxy) throws CertificateException {
+        this.sessionContext = null;
+        this.sslContext = hc.sslContext;
 
-        if (SSLLogger.isOn && SSLLogger.isOn("session")) {
-             SSLLogger.finest("Session initialized:  " + this);
-        }
-    }
+        this.protocolVersion = proxy.protocolVersion;
+        this.sessionId = new SessionId(proxy.sessionId);
+        this.creationTime = proxy.creationTime;
 
-    /**
-     * < 2 bytes > protocolVersion
-     * < 2 bytes > cipherSuite
-     * < 1 byte > localSupportedSignAlgs entries
-     *   < 2 bytes per entries > localSupportedSignAlgs
-     * < 1 bytes > peerSupportedSignAlgs entries
-     *   < 2 bytes per entries > peerSupportedSignAlgs
-     * < 2 bytes > preSharedKey length
-     * < length in bytes > preSharedKey
-     * < 1 byte > pskIdentity length
-     * < length in bytes > pskIdentity
-     * < 1 byte > masterSecret length
-     *   < 1 byte > masterSecret algorithm length
-     *   < length in bytes > masterSecret algorithm
-     *   < 2 bytes > masterSecretKey length
-     *   < length in bytes> masterSecretKey
-     * < 1 byte > useExtendedMasterSecret
-     * < 1 byte > identificationProtocol length
-     * < length in bytes > identificationProtocol
-     * < 1 byte > serverNameIndication length
-     * < length in bytes > serverNameIndication
-     * < 1 byte > Number of requestedServerNames entries
-     *   < 1 byte > ServerName length
-     *   < length in bytes > ServerName
-     * < 4 bytes > creationTime
-     * < 2 byte > status response length
-     *   < 2 byte > status response entry length
-     *   < length in byte > status response entry
-     * < 1 byte > Length of peer host
-     *   < length in bytes > peer host
-     * < 2 bytes> peer port
-     * < 1 byte > Number of peerCerts entries
-     *   < 4 byte > peerCert length
-     *   < length in bytes > peerCert
-     * < 1 byte > localCerts type (Cert, PSK, Anonymous)
-     *   Certificate
-     *     < 1 byte > Number of Certificate entries
-     *       < 4 byte> Certificate length
-     *       < length in bytes> Certificate
-     *   PSK
-     *     < 1 byte > Number of PSK entries
-     *       < 1 bytes > PSK algorithm length
-     *       < length in bytes > PSK algorithm string
-     *       < 4 bytes > PSK key length
-     *       < length in bytes> PSK key
-     *       < 4 bytes > PSK identity length
-     *       < length in bytes> PSK identity
-     *   Anonymous
-     *     < 1 byte >
-     * < 4 bytes > maximumPacketSize
-     * < 4 bytes > negotiatedMaxFragSize
-     */
+        // Reset the peer host and port.
+        this.host = hc.conContext.transport.getPeerHost();
+        this.port = hc.conContext.transport.getPeerPort();
 
-    SSLSessionImpl(HandshakeContext hc, ByteBuffer buf) throws IOException {
-        int i = 0;
-        byte[] b;
-
-        boundValues = new ConcurrentHashMap<>();
-        this.protocolVersion =
-                ProtocolVersion.valueOf(Short.toUnsignedInt(buf.getShort()));
-
-        // The CH session id may reset this if it's provided
-        this.sessionId = new SessionId(true,
-                hc.sslContext.getSecureRandom());
-
-        this.cipherSuite =
-                CipherSuite.valueOf(Short.toUnsignedInt(buf.getShort()));
-
-        // Local Supported signature algorithms
-        ArrayList<SignatureScheme> list = new ArrayList<>();
-        i = Byte.toUnsignedInt(buf.get());
-        while (i-- > 0) {
-            list.add(SignatureScheme.valueOf(
-                    Short.toUnsignedInt(buf.getShort())));
-        }
-        this.localSupportedSignAlgs = Collections.unmodifiableCollection(list);
-
-        // Peer Supported signature algorithms
-        i = Byte.toUnsignedInt(buf.get());
-        list.clear();
-        while (i-- > 0) {
-            list.add(SignatureScheme.valueOf(
-                    Short.toUnsignedInt(buf.getShort())));
-        }
-        this.peerSupportedSignAlgs = Collections.unmodifiableCollection(list);
-
-        // PSK
-        i = Short.toUnsignedInt(buf.getShort());
-        if (i > 0) {
-            b = new byte[i];
-            // Get algorithm string
-            buf.get(b, 0, i);
-            // Encoded length
-            i = Short.toUnsignedInt(buf.getShort());
-            // Encoded SecretKey
-            b = new byte[i];
-            buf.get(b);
-            this.preSharedKey = new SecretKeySpec(b, "TlsMasterSecret");
+        if (proxy.sniType < 0 || proxy.sniType >= 0xFF ||   // one byte field
+                proxy.sniEncoded == null || proxy.sniEncoded.length == 0) {
+            this.serverNameIndication = null;
+        } else if (proxy.sniType == StandardConstants.SNI_HOST_NAME) {
+            this.serverNameIndication = new SNIHostName(proxy.sniEncoded);
         } else {
-            this.preSharedKey = null;
+            this.serverNameIndication =
+                    new UnknownServerName(proxy.sniType, proxy.sniEncoded);
         }
 
-        // PSK identity
-        i = buf.get();
-        if (i > 0) {
-            b = new byte[i];
-            buf.get(b);
-            this.pskIdentity = b;
-        } else {
-            this.pskIdentity = null;
-        }
-
-        // Master secret length of secret key algorithm  (one byte)
-        i = buf.get();
-        if (i > 0) {
-            b = new byte[i];
-            // Get algorithm string
-            buf.get(b, 0, i);
-            // Encoded length
-            i = Short.toUnsignedInt(buf.getShort());
-            // Encoded SecretKey
-            b = new byte[i];
-            buf.get(b);
-            this.masterSecret = new SecretKeySpec(b, "TlsMasterSecret");
-        } else {
-            this.masterSecret = null;
-        }
-        // Use extended master secret
-        this.useExtendedMasterSecret = (buf.get() != 0);
-
-        // Identification Protocol
-        i = buf.get();
-        if (i == 0) {
-            identificationProtocol = null;
-        } else {
-            b = new byte[i];
-            buf.get(b);
-            identificationProtocol = new String(b);
-        }
-
-        // SNI
-        i = buf.get();  // length
-        if (i == 0) {
-            serverNameIndication = null;
-        } else {
-            b = new byte[i];
-            buf.get(b, 0, b.length);
-            serverNameIndication = new SNIHostName(b);
-        }
-
-        // List of SNIServerName
-        int len = Short.toUnsignedInt(buf.getShort());
-        if (len == 0) {
-            this.requestedServerNames = Collections.<SNIServerName>emptyList();
-        } else {
-            requestedServerNames = new ArrayList<>();
-            while (len > 0) {
-                int l = buf.get();
-                b = new byte[l];
-                buf.get(b, 0, l);
-                requestedServerNames.add(new SNIHostName(new String(b)));
-                len--;
+        this.requestedServerNames = new LinkedList<>();
+        proxy.requestedServerNames.forEach((k, v) -> {
+            if (k == StandardConstants.SNI_HOST_NAME) {
+                this.requestedServerNames.add(new SNIHostName(v));
+            } else {
+                this.requestedServerNames.add(new UnknownServerName(k, v));
             }
-        }
+        });
 
-        maximumPacketSize = buf.getInt();
-        negotiatedMaxFragLen = buf.getInt();
+        this.identificationProtocol = proxy.identificationProtocol;
+        this.useExtendedMasterSecret = proxy.useExtendedMasterSecret;
 
-        // Get creation time
-        this.creationTime = buf.getLong();
-
-        // Get Buffer sizes
-
-        // Status Response
-        len = Short.toUnsignedInt(buf.getShort());
-        if (len == 0) {
-            statusResponses = Collections.emptyList();
-        } else {
-            statusResponses = new ArrayList<>();
-        }
-        while (len-- > 0) {
-            b = new byte[Short.toUnsignedInt(buf.getShort())];
-            buf.get(b);
-            statusResponses.add(b);
-        }
-
-        // Get Peer host & port
-        i = Byte.toUnsignedInt(buf.get());
-        if (i == 0) {
-            this.host = new String();
-        } else {
-            b = new byte[i];
-            buf.get(b, 0, i);
-            this.host = new String(b);
-        }
-        this.port = Short.toUnsignedInt(buf.getShort());
-
-        // Peer certs
-        i = buf.get();
-        if (i == 0) {
+        if (proxy.peerCerts == null || proxy.peerCerts.length == 0) {
             this.peerCerts = null;
         } else {
-            this.peerCerts = new X509Certificate[i];
-            int j = 0;
-            while (i > j) {
-                b = new byte[buf.getInt()];
-                buf.get(b);
-                try {
-                    this.peerCerts[j] = new X509CertImpl(b);
-                } catch (Exception e) {
-                    throw new IOException(e);
-                }
-                j++;
+            this.peerCerts = new X509Certificate[proxy.peerCerts.length];
+            int i = 0;
+            for (byte[] encodedCert : proxy.peerCerts) {
+                this.peerCerts[i++] = new X509CertImpl(encodedCert);
             }
         }
 
-        // Get local certs of PSK
-        switch (buf.get()) {
-            case 0:
-                break;
-            case 1:
-                // number of certs
-                len = buf.get();
-                this.localCerts = new X509Certificate[len];
-                i = 0;
-                while (len > i) {
-                    b = new byte[buf.getInt()];
-                    buf.get(b);
-                    try {
-                        this.localCerts[i] = new X509CertImpl(b);
-                    } catch (Exception e) {
-                        throw new IOException(e);
-                    }
-                    i++;
-                }
-                break;
-            case 2:
-                // pre-shared key
-                // Length of pre-shared key algorithm  (one byte)
-                i = buf.get();
-                b = new byte[i];
-                buf.get(b, 0 , i);
-                String alg = new String(b);
-                // Get length of encoding
-                i = Short.toUnsignedInt(buf.getShort());
-                // Get encoding
-                b = new byte[i];
-                buf.get(b);
-                this.preSharedKey = new SecretKeySpec(b, alg);
-                // Get identity len
-                this.pskIdentity = new byte[buf.get()];
-                buf.get(pskIdentity);
-                break;
-            default:
-                throw new SSLException("Failed local certs of session.");
-        }
-
-        context = (SSLSessionContextImpl)
-                hc.sslContext.engineGetServerSessionContext();
+        this.cipherSuite = proxy.cipherSuite;
+        this.masterSecret = proxy.masterSecret;
         this.lastUsedTime = System.currentTimeMillis();
+        this.invalidated = false;
+
+        this.localPrivateKeyAlias = proxy.localPrivateKeyAlias;
+        this.localSupportedSignAlgs = proxy.localSupportedSignAlgs;
+        this.peerSupportedSignAlgs = proxy.peerSupportedSignAlgs;
+        this.useDefaultPeerSignAlgs = proxy.useDefaultPeerSignAlgs;
+
+        this.negotiatedMaxFragLen = proxy.negotiatedMaxFragLen;
+        this.maximumPacketSize = proxy.maximumPacketSize;
+
+        this.boundValues = new ConcurrentHashMap<>();
     }
 
     // Some situations we cannot provide a stateless ticket, but after it
     // has been negotiated
     boolean isStatelessable() {
-        // If there is no getMasterSecret with TLS1.2 or under, do not resume.
+        // If there is no masterSecret with TLS1.2 or under, do not resume.
         if (!protocolVersion.useTLS13PlusSpec() &&
-                getMasterSecret().getEncoded() == null) {
+                (masterSecret == null || masterSecret.getEncoded() == null)) {
+            // The masterSecret may have not been negotiated if calling to
+            // generate session ticket extension.
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.finest("No MasterSecret, cannot make stateless" +
                         " ticket");
             }
+
             return false;
         }
 
@@ -534,198 +290,16 @@ final class SSLSessionImpl extends ExtendedSSLSession {
                 SSLLogger.finest("There are boundValues, cannot make" +
                         " stateless ticket");
             }
+
             return false;
         }
 
         return true;
     }
 
-    /**
-     * Write out a SSLSessionImpl in a byte array for a stateless session ticket
-     */
-    byte[] write() throws Exception {
-        byte[] b;
-        HandshakeOutStream hos = new HandshakeOutStream(null);
-
-        hos.putInt16(protocolVersion.id);
-        hos.putInt16(cipherSuite.id);
-
-        // Local Supported signature algorithms
-        hos.putInt8(localSupportedSignAlgs.size());
-        for (SignatureScheme s : localSupportedSignAlgs) {
-            hos.putInt16(s.id);
-        }
-
-        // Peer Supported signature algorithms
-        hos.putInt8(peerSupportedSignAlgs.size());
-        for (SignatureScheme s : peerSupportedSignAlgs) {
-            hos.putInt16(s.id);
-        }
-
-        // PSK
-        if (preSharedKey == null ||
-                preSharedKey.getAlgorithm() == null) {
-            hos.putInt16(0);
-        } else {
-            hos.putInt16(preSharedKey.getAlgorithm().length());
-            if (preSharedKey.getAlgorithm().length() != 0) {
-                hos.write(preSharedKey.getAlgorithm().getBytes());
-            }
-            b = preSharedKey.getEncoded();
-            hos.putInt16(b.length);
-            hos.write(b, 0, b.length);
-        }
-
-        // PSK Identity
-        if (pskIdentity == null) {
-            hos.putInt8(0);
-        } else {
-            hos.putInt8(pskIdentity.length);
-            hos.write(pskIdentity, 0, pskIdentity.length);
-        }
-
-        // Master Secret
-        if (getMasterSecret() == null ||
-                getMasterSecret().getAlgorithm() == null) {
-            hos.putInt8(0);
-        } else {
-            hos.putInt8(getMasterSecret().getAlgorithm().length());
-            if (getMasterSecret().getAlgorithm().length() != 0) {
-                hos.write(getMasterSecret().getAlgorithm().getBytes());
-            }
-            b = getMasterSecret().getEncoded();
-            hos.putInt16(b.length);
-            hos.write(b, 0, b.length);
-        }
-
-        hos.putInt8(useExtendedMasterSecret ? 1 : 0);
-
-        // Identification Protocol
-        if (identificationProtocol == null) {
-            hos.putInt8(0);
-        } else {
-            hos.putInt8(identificationProtocol.length());
-            hos.write(identificationProtocol.getBytes(), 0,
-                    identificationProtocol.length());
-        }
-
-        // SNI
-        if (serverNameIndication == null) {
-            hos.putInt8(0);
-        } else {
-            b = serverNameIndication.getEncoded();
-            hos.putInt8(b.length);
-            hos.write(b, 0, b.length);
-        }
-
-        // List of SNIServerName
-        hos.putInt16(requestedServerNames.size());
-        if (requestedServerNames.size() > 0) {
-            for (SNIServerName sn : requestedServerNames) {
-                b = sn.getEncoded();
-                hos.putInt8(b.length);
-                hos.write(b, 0, b.length);
-            }
-        }
-
-        // Buffer sizes
-        hos.putInt32(maximumPacketSize);
-        hos.putInt32(negotiatedMaxFragLen);
-
-        // creation time
-        ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES);
-        hos.writeBytes(buffer.putLong(creationTime).array());
-
-        // Status Responses
-        List<byte[]> list = getStatusResponses();
-        int l = list.size();
-        hos.putInt16(l);
-        for (byte[] e : list) {
-            hos.putInt16(e.length);
-            hos.write(e);
-        }
-
-        // peer Host & Port
-        if (host == null || host.length() == 0) {
-            hos.putInt8(0);
-        } else {
-            hos.putInt8(host.length());
-            hos.writeBytes(host.getBytes());
-        }
-        hos.putInt16(port);
-
-        // Peer cert
-        if (peerCerts == null || peerCerts.length == 0) {
-            hos.putInt8(0);
-        } else {
-            hos.putInt8(peerCerts.length);
-            for (X509Certificate c : peerCerts) {
-                b = c.getEncoded();
-                hos.putInt32(b.length);
-                hos.writeBytes(b);
-            }
-        }
-
-        // Client identity
-        if (localCerts != null && localCerts.length > 0) {
-            // certificate based
-            hos.putInt8(1);
-            hos.putInt8(localCerts.length);
-            for (X509Certificate c : localCerts) {
-                b = c.getEncoded();
-                hos.putInt32(b.length);
-                hos.writeBytes(b);
-            }
-        } else if (preSharedKey != null) {
-            // pre-shared key
-            hos.putInt8(2);
-            hos.putInt8(preSharedKey.getAlgorithm().length());
-            hos.write(preSharedKey.getAlgorithm().getBytes());
-            b = preSharedKey.getEncoded();
-            hos.putInt32(b.length);
-            hos.writeBytes(b);
-            hos.putInt32(pskIdentity.length);
-            hos.writeBytes(pskIdentity);
-        } else {
-            // anonymous
-            hos.putInt8(0);
-        }
-
-        return hos.toByteArray();
-    }
-
+    // Used by TLS 1.2 and prior versions only.
     void setMasterSecret(SecretKey secret) {
         masterSecret = secret;
-    }
-
-    void setResumptionMasterSecret(SecretKey secret) {
-        resumptionMasterSecret = secret;
-    }
-
-    void setPreSharedKey(SecretKey key) {
-        preSharedKey = key;
-    }
-
-    void addChild(SSLSessionImpl session) {
-        childSessions.add(session);
-    }
-
-    void setTicketAgeAdd(int ticketAgeAdd) {
-        this.ticketAgeAdd = ticketAgeAdd;
-    }
-
-    void setPskIdentity(byte[] pskIdentity) {
-        this.pskIdentity = pskIdentity;
-    }
-
-    BigInteger incrTicketNonceCounter() {
-        BigInteger result = ticketNonceCounter;
-        ticketNonceCounter = ticketNonceCounter.add(BigInteger.ONE);
-        return result;
-    }
-
-    boolean isPSKable() {
-        return (ticketNonceCounter.compareTo(BigInteger.ZERO) > 0);
     }
 
     /**
@@ -735,53 +309,8 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         return masterSecret;
     }
 
-    SecretKey getResumptionMasterSecret() {
-        return resumptionMasterSecret;
-    }
-
-    SecretKey getPreSharedKey() {
-        sessionLock.lock();
-        try {
-            return preSharedKey;
-        } finally {
-            sessionLock.unlock();
-        }
-    }
-
-    SecretKey consumePreSharedKey() {
-        sessionLock.lock();
-        try {
-            return preSharedKey;
-        } finally {
-            preSharedKey = null;
-            sessionLock.unlock();
-        }
-    }
-
-    int getTicketAgeAdd() {
-        return ticketAgeAdd;
-    }
-
     String getIdentificationProtocol() {
         return this.identificationProtocol;
-    }
-
-    /* PSK identities created from new_session_ticket messages should only
-     * be used once. This method will return the identity and then clear it
-     * so it cannot be used again.
-     */
-    byte[] consumePskIdentity() {
-        sessionLock.lock();
-        try {
-            return pskIdentity;
-        } finally {
-            pskIdentity = null;
-            sessionLock.unlock();
-        }
-    }
-
-    byte[] getPskIdentity() {
-        return pskIdentity;
     }
 
     void setPeerCertificates(X509Certificate[] peer) {
@@ -790,17 +319,17 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         }
     }
 
-    void setLocalCertificates(X509Certificate[] local) {
-        localCerts = local;
-    }
-
-    void setLocalPrivateKey(PrivateKey privateKey) {
-        localPrivateKey = privateKey;
+    void setLocalPrivateKey(X509Authentication.X509Possession possession) {
+        this.localPrivateKeyAlias = possession.popPrivateKeyAlias;
     }
 
     void setPeerSupportedSignatureAlgorithms(
             Collection<SignatureScheme> signatureSchemes) {
-        peerSupportedSignAlgs = signatureSchemes;
+        if (signatureSchemes == null ||  signatureSchemes.isEmpty()) {
+            peerSupportedSignAlgs = Collections.emptySet();
+        } else {
+            peerSupportedSignAlgs = signatureSchemes;
+        }
     }
 
     // TLS 1.2 only
@@ -814,7 +343,8 @@ final class SSLSessionImpl extends ExtendedSSLSession {
     // certificates and server key exchange), it MUST send the
     // signature_algorithms extension, listing the algorithms it
     // is willing to accept.
-    private static final ArrayList<SignatureScheme> defaultPeerSupportedSignAlgs =
+    private static
+        final ArrayList<SignatureScheme> defaultPeerSupportedSignAlgs =
             new ArrayList<>(Arrays.asList(SignatureScheme.RSA_PKCS1_SHA1,
                     SignatureScheme.DSA_SHA1,
                     SignatureScheme.ECDSA_SHA1));
@@ -833,40 +363,16 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         return this;
     }
 
-    /**
-     * Provide status response data obtained during the SSL handshake.
-     *
-     * @param responses a {@link List} of responses in binary form.
-     */
-    void setStatusResponses(List<byte[]> responses) {
-        if (responses != null && !responses.isEmpty()) {
-            statusResponses = responses;
-        } else {
-            statusResponses = Collections.emptyList();
-        }
-    }
-
-    /**
-     * Returns true iff this session may be resumed ... sessions are
-     * usually resumable.  Security policies may suggest otherwise,
-     * for example sessions that haven't been used for a while (say,
-     * a working day) won't be resumable, and sessions might have a
-     * maximum lifetime in any case.
-     */
-    boolean isRejoinable() {
-        // TLS 1.3 can have no session id
-        if (protocolVersion.useTLS13PlusSpec()) {
-            return (!invalidated && isLocalAuthenticationValid());
-        }
-        return sessionId != null && sessionId.length() != 0 &&
-                !invalidated && isLocalAuthenticationValid();
+    // Check if the session worthy of cache.
+    boolean worthyOfCache() {
+        return !invalidated;
     }
 
     @Override
     public boolean isValid() {
         sessionLock.lock();
         try {
-            return isRejoinable();
+            return !invalidated && isLocalAuthenticationValid();
         } finally {
             sessionLock.unlock();
         }
@@ -877,28 +383,26 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * is still valid. Returns true if no authentication was used
      */
     private boolean isLocalAuthenticationValid() {
-        if (localPrivateKey != null) {
-            try {
-                // if the private key is no longer valid, getAlgorithm()
-                // should throw an exception
-                // (e.g. Smartcard has been removed from the reader)
-                localPrivateKey.getAlgorithm();
-            } catch (Exception e) {
-                invalidate();
-                return false;
+        if (localPrivateKeyAlias != null) {
+            X509ExtendedKeyManager km = sslContext.getX509KeyManager();
+            if (km != null) {       // unlikely
+                PrivateKey localPrivateKey =
+                        km.getPrivateKey(localPrivateKeyAlias);
+                if (localPrivateKey != null) {
+                    try {
+                        // if the private key is no longer valid, getAlgorithm()
+                        // should throw an exception
+                        // (e.g. smart card has been removed from the reader)
+                        localPrivateKey.getAlgorithm();
+                    } catch (Exception e) {
+                        invalidate();
+                        return false;
+                    }
+                }
             }
         }
 
         return true;
-    }
-
-    /**
-     * Returns the ID for this session.  The ID is fixed for the
-     * duration of the session; neither it, nor its value, changes.
-     */
-    @Override
-    public byte[] getId() {
-        return sessionId.getId();
     }
 
     /**
@@ -923,14 +427,12 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             sm.checkPermission(new SSLPermission("getSSLSessionContext"));
         }
 
-        return context;
+        return sessionContext;
     }
-
 
     SessionId getSessionId() {
         return sessionId;
     }
-
 
     /**
      * Returns the cipher spec in use on this session
@@ -943,27 +445,11 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * Resets the cipher spec in use on this session
      */
     void setSuite(CipherSuite suite) {
-       cipherSuite = suite;
+        cipherSuite = suite;
 
         if (SSLLogger.isOn && SSLLogger.isOn("session")) {
-             SSLLogger.finest("Negotiating session:  " + this);
-       }
-    }
-
-    /**
-     * Return true if the session is currently re-established with a
-     * session-resumption abbreviated initial handshake.
-     */
-    boolean isSessionResumption() {
-        return isSessionResumption;
-    }
-
-    /**
-     * Resets whether the session is re-established with a session-resumption
-     * abbreviated initial handshake.
-     */
-    void setAsSessionResumption(boolean flag) {
-        isSessionResumption = flag;
+            SSLLogger.finest("Negotiating session:  " + this);
+        }
     }
 
     /**
@@ -987,34 +473,6 @@ final class SSLSessionImpl extends ExtendedSSLSession {
     }
 
     /**
-     * Returns the hashcode for this session
-     */
-    @Override
-    public int hashCode() {
-        return sessionId.hashCode();
-    }
-
-    /**
-     * Returns true if sessions have same ids, false otherwise.
-     */
-    @Override
-    public boolean equals(Object obj) {
-
-        if (obj == this) {
-            return true;
-        }
-
-        if (obj instanceof SSLSessionImpl) {
-            SSLSessionImpl sess = (SSLSessionImpl) obj;
-            return (sessionId != null) && (sessionId.equals(
-                        sess.getSessionId()));
-        }
-
-        return false;
-    }
-
-
-    /**
      * Return the cert chain presented by the peer in the
      * java.security.cert format.
      * Note: This method can be used only when using certificate-based
@@ -1022,7 +480,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * will throw an SSLPeerUnverifiedException.
      *
      * @return array of peer X.509 certs, with the peer's own cert
-     *  first in the chain, and with the "root" CA last.
+     * first in the chain, and with the "root" CA last.
      */
     @Override
     public java.security.cert.Certificate[] getPeerCertificates()
@@ -1035,10 +493,11 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         if (peerCerts == null) {
             throw new SSLPeerUnverifiedException("peer not authenticated");
         }
+
         // Certs are immutable objects, therefore we don't clone them.
         // But do need to clone the array, so that nothing is inserted
         // into peerCerts.
-        return (java.security.cert.Certificate[])peerCerts.clone();
+        return peerCerts.clone();
     }
 
     /**
@@ -1048,16 +507,18 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * cipher suites.
      *
      * @return array of peer X.509 certs, with the peer's own cert
-     *  first in the chain, and with the "root" CA last.
+     * first in the chain, and with the "root" CA last.
      */
     @Override
     public java.security.cert.Certificate[] getLocalCertificates() {
-        //
-        // clone to preserve integrity of session ... caller can't
-        // change record of peer identity even by accident, much
-        // less do it intentionally.
-        return (localCerts == null ? null :
-            (java.security.cert.Certificate[])localCerts.clone());
+        if (localPrivateKeyAlias != null) {
+            X509ExtendedKeyManager km = sslContext.getX509KeyManager();
+            if (km != null) {       // unlikely
+                return km.getCertificateChain(localPrivateKeyAlias);
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1067,7 +528,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * will throw an SSLPeerUnverifiedException.
      *
      * @return array of peer X.509 certs, with the peer's own cert
-     *  first in the chain, and with the "root" CA last.
+     * first in the chain, and with the "root" CA last.
      */
     public X509Certificate[] getCertificateChain()
             throws SSLPeerUnverifiedException {
@@ -1083,28 +544,9 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         }
     }
 
-    /**
-     * Return a List of status responses presented by the peer.
-     * Note: This method can be used only when using certificate-based
-     * server authentication; otherwise an empty {@code List} will be returned.
-     *
-     * @return an unmodifiable {@code List} of byte arrays, each consisting
-     * of a DER-encoded OCSP response (see RFC 6960).  If no responses have
-     * been presented by the server or non-certificate based server
-     * authentication is used then an empty {@code List} is returned.
-     */
     @Override
     public List<byte[]> getStatusResponses() {
-        if (statusResponses == null || statusResponses.isEmpty()) {
             return Collections.emptyList();
-        } else {
-            // Clone both the list and the contents
-            List<byte[]> responses = new ArrayList<>(statusResponses.size());
-            for (byte[] respBytes : statusResponses) {
-                responses.add(respBytes.clone());
-            }
-            return Collections.unmodifiableList(responses);
-        }
     }
 
     /**
@@ -1113,14 +555,12 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      *
      * @return the peer's principal. Returns an X500Principal of the
      * end-entity certificate for X509-based cipher suites.
-     *
      * @throws SSLPeerUnverifiedException if the peer's identity has not
-     *          been verified
+     *                                    been verified
      */
     @Override
     public Principal getPeerPrincipal()
-                throws SSLPeerUnverifiedException
-    {
+            throws SSLPeerUnverifiedException {
         if (peerCerts == null) {
             throw new SSLPeerUnverifiedException("peer not authenticated");
         }
@@ -1136,15 +576,18 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      */
     @Override
     public Principal getLocalPrincipal() {
-        return ((localCerts == null || localCerts.length == 0) ? null :
-                localCerts[0].getSubjectX500Principal());
-    }
+        if (localPrivateKeyAlias != null) {
+            X509ExtendedKeyManager km = sslContext.getX509KeyManager();
+            if (km != null) {       // unlikely
+                X509Certificate[] localCerts =
+                        km.getCertificateChain(localPrivateKeyAlias);
+                if (localCerts != null && localCerts.length != 0) {
+                    return localCerts[0].getSubjectX500Principal();
+                }
+            }
+        }
 
-    /*
-     * Return the time the ticket for this session was created.
-     */
-    public long getTicketCreationTime() {
-        return ticketCreationTime;
+        return null;
     }
 
     /**
@@ -1168,21 +611,6 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         lastUsedTime = time;
     }
 
-
-    /**
-     * Returns the network address of the session's peer.  This
-     * implementation does not insist that connections between
-     * different ports on the same host must necessarily belong
-     * to different sessions, though that is of course allowed.
-     */
-    public InetAddress getPeerAddress() {
-        try {
-            return InetAddress.getByName(host);
-        } catch (java.net.UnknownHostException e) {
-            return null;
-        }
-    }
-
     @Override
     public String getPeerHost() {
         return host;
@@ -1197,9 +625,10 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         return port;
     }
 
-    void setContext(SSLSessionContextImpl ctx) {
-        if (context == null) {
-            context = ctx;
+    // Used when binding with the session context.
+    void setSessionContext(SSLSessionContextImpl ctx) {
+        if (sessionContext == null) {
+            sessionContext = ctx;
         }
     }
 
@@ -1211,9 +640,9 @@ final class SSLSessionImpl extends ExtendedSSLSession {
     public void invalidate() {
         sessionLock.lock();
         try {
-            if (context != null) {
-                context.remove(sessionId);
-                context = null;
+            if (sessionContext != null) {
+                sessionContext.remove(this);
+                sessionContext = null;
             }
 
             if (invalidated) {
@@ -1221,29 +650,19 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             }
             invalidated = true;
             if (SSLLogger.isOn && SSLLogger.isOn("session")) {
-                 SSLLogger.finest("Invalidated session:  " + this);
-            }
-            for (SSLSessionImpl child : childSessions) {
-                child.invalidate();
+                SSLLogger.finest("Invalidated session:  " + this);
             }
         } finally {
             sessionLock.unlock();
         }
     }
 
-    /*
-     * Table of application-specific session data indexed by an application
-     * key and the calling security context. This is important since
-     * sessions can be shared across different protection domains.
-     */
-    private final ConcurrentHashMap<SecureKey, Object> boundValues;
-    boolean updateNST;
-
     /**
      * Assigns a session value.  Session change events are given if
      * appropriate, to any original value as well as the new value.
      */
     @Override
+    @SuppressWarnings("deprecation")
     public void putValue(String key, Object value) {
         if ((key == null) || (value == null)) {
             throw new IllegalArgumentException("arguments can not be null");
@@ -1256,16 +675,13 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             SSLSessionBindingEvent e;
 
             e = new SSLSessionBindingEvent(this, key);
-            ((SSLSessionBindingListener)oldValue).valueUnbound(e);
+            ((SSLSessionBindingListener) oldValue).valueUnbound(e);
         }
         if (value instanceof SSLSessionBindingListener) {
             SSLSessionBindingEvent e;
 
             e = new SSLSessionBindingEvent(this, key);
-            ((SSLSessionBindingListener)value).valueBound(e);
-        }
-        if (protocolVersion.useTLS13PlusSpec()) {
-            updateNST = true;
+            ((SSLSessionBindingListener) value).valueBound(e);
         }
     }
 
@@ -1273,6 +689,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * Returns the specified session value.
      */
     @Override
+    @SuppressWarnings("deprecation")
     public Object getValue(String key) {
         if (key == null) {
             throw new IllegalArgumentException("argument can not be null");
@@ -1288,6 +705,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * event as appropriate.
      */
     @Override
+    @SuppressWarnings("deprecation")
     public void removeValue(String key) {
         if (key == null) {
             throw new IllegalArgumentException("argument can not be null");
@@ -1300,23 +718,20 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             SSLSessionBindingEvent e;
 
             e = new SSLSessionBindingEvent(this, key);
-            ((SSLSessionBindingListener)value).valueUnbound(e);
-        }
-        if (protocolVersion.useTLS13PlusSpec()) {
-            updateNST = true;
+            ((SSLSessionBindingListener) value).valueUnbound(e);
         }
     }
-
 
     /**
      * Lists the names of the session values.
      */
     @Override
+    @SuppressWarnings("deprecation")
     public String[] getValueNames() {
         ArrayList<Object> v = new ArrayList<>();
         Object securityCtx = SecureKey.getCurrentSecurityContext();
         for (Enumeration<SecureKey> e = boundValues.keys();
-                e.hasMoreElements(); ) {
+             e.hasMoreElements(); ) {
             SecureKey key = e.nextElement();
             if (securityCtx.equals(key.getSecurityContext())) {
                 v.add(key.getAppKey());
@@ -1325,23 +740,6 @@ final class SSLSessionImpl extends ExtendedSSLSession {
 
         return v.toArray(new String[0]);
     }
-
-    /**
-     * Use large packet sizes now or follow RFC 2246 packet sizes (2^14)
-     * until changed.
-     *
-     * In the TLS specification (section 6.2.1, RFC2246), it is not
-     * recommended that the plaintext has more than 2^14 bytes.
-     * However, some TLS implementations violate the specification.
-     * This is a workaround for interoperability with these stacks.
-     *
-     * Application could accept large fragments up to 2^15 bytes by
-     * setting the system property jsse.SSLEngine.acceptLargeFragments
-     * to "true".
-     */
-    private boolean acceptLargeFragments =
-            Utilities.getBooleanProperty(
-                    "jsse.SSLEngine.acceptLargeFragments", false);
 
     /**
      * Expand the buffer size of both SSL/TLS network packet and
@@ -1374,12 +772,11 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             }
 
             if (maximumPacketSize > 0) {
-                return (maximumPacketSize > packetSize) ?
-                        maximumPacketSize : packetSize;
+                return Math.max(maximumPacketSize, packetSize);
             }
 
             if (packetSize != 0) {
-               return packetSize;
+                return packetSize;
             }
 
             if (protocolVersion.isDTLS) {
@@ -1411,8 +808,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
             }
 
             if (negotiatedMaxFragLen > 0) {
-                return (negotiatedMaxFragLen > fragmentSize) ?
-                        negotiatedMaxFragLen : fragmentSize;
+                return Math.max(negotiatedMaxFragLen, fragmentSize);
             }
 
             if (fragmentSize != 0) {
@@ -1423,7 +819,7 @@ final class SSLSessionImpl extends ExtendedSSLSession {
                 return Record.maxDataSize;
             } else {
                 int maxPacketSize = acceptLargeFragments ?
-                            SSLRecord.maxLargeRecordSize : SSLRecord.maxRecordSize;
+                        SSLRecord.maxLargeRecordSize : SSLRecord.maxRecordSize;
                 return (maxPacketSize - SSLRecord.headerSize);
             }
         } finally {
@@ -1435,12 +831,10 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * Sets the negotiated maximum fragment length, as specified by the
      * max_fragment_length ClientHello extension in RFC 6066.
      *
-     * @param  negotiatedMaxFragLen
-     *         the negotiated maximum fragment length, or {@code -1} if
-     *         no such length has been negotiated.
+     * @param negotiatedMaxFragLen the negotiated maximum fragment length,
+     *        or {@code -1} if no such length has been negotiated.
      */
-    void setNegotiatedMaxFragSize(
-            int negotiatedMaxFragLen) {
+    void setNegotiatedMaxFragSize(int negotiatedMaxFragLen) {
         sessionLock.lock();
         try {
             this.negotiatedMaxFragLen = negotiatedMaxFragLen;
@@ -1454,30 +848,12 @@ final class SSLSessionImpl extends ExtendedSSLSession {
      * max_fragment_length ClientHello extension in RFC 6066.
      *
      * @return the negotiated maximum fragment length, or {@code -1} if
-     *         no such length has been negotiated.
+     * no such length has been negotiated.
      */
     int getNegotiatedMaxFragSize() {
         sessionLock.lock();
         try {
             return negotiatedMaxFragLen;
-        } finally {
-            sessionLock.unlock();
-        }
-    }
-
-    void setMaximumPacketSize(int maximumPacketSize) {
-        sessionLock.lock();
-        try {
-            this.maximumPacketSize = maximumPacketSize;
-        } finally {
-            sessionLock.unlock();
-        }
-    }
-
-    int getMaximumPacketSize() {
-        sessionLock.lock();
-        try {
-            return maximumPacketSize;
         } finally {
             sessionLock.unlock();
         }
@@ -1490,14 +866,6 @@ final class SSLSessionImpl extends ExtendedSSLSession {
     @Override
     public String[] getLocalSupportedSignatureAlgorithms() {
         return SignatureScheme.getAlgorithmNames(localSupportedSignAlgs);
-    }
-
-    /**
-     * Gets an array of supported signature schemes that the local side is
-     * willing to verify.
-     */
-    public Collection<SignatureScheme> getLocalSupportedSignatureSchemes() {
-        return localSupportedSignAlgs;
     }
 
     /**
@@ -1518,54 +886,764 @@ final class SSLSessionImpl extends ExtendedSSLSession {
         return requestedServerNames;
     }
 
-    /** Returns a string representation of this SSL session */
+    /**
+     * Returns a string representation of this SSL session
+     */
     @Override
     public String toString() {
-        return "Session(" + creationTime + "|" + getCipherSuite() + ")";
-    }
-}
-
-/**
- * This "struct" class serves as a Hash Key that combines an
- * application-specific key and a security context.
- */
-class SecureKey {
-    private static final Object     nullObject = new Object();
-    private final Object            appKey;
-    private final Object            securityCtx;
-
-    static Object getCurrentSecurityContext() {
-        SecurityManager sm = System.getSecurityManager();
-        Object context = null;
-
-        if (sm != null)
-            context = sm.getSecurityContext();
-        if (context == null)
-            context = nullObject;
-        return context;
+        return "Session(" + creationTime + "|" + getCipherSuite() + "|" +
+                sessionId + "|" + (invalidated ? "invalid" : "valid") + ")";
     }
 
-    SecureKey(Object key) {
-        this.appKey = key;
-        this.securityCtx = getCurrentSecurityContext();
+    /**
+     * This "struct" class serves as a Hash Key that combines an
+     * application-specific key and a security context.
+     */
+    private static class SecureKey {
+        private static final Object nullObject = new Object();
+        private final Object appKey;
+        private final Object securityCtx;
+
+        static Object getCurrentSecurityContext() {
+            SecurityManager sm = System.getSecurityManager();
+            Object context = null;
+
+            if (sm != null)
+                context = sm.getSecurityContext();
+            if (context == null)
+                context = nullObject;
+            return context;
+        }
+
+        SecureKey(Object key) {
+            this.appKey = key;
+            this.securityCtx = getCurrentSecurityContext();
+        }
+
+        Object getAppKey() {
+            return appKey;
+        }
+
+        Object getSecurityContext() {
+            return securityCtx;
+        }
+
+        @Override
+        public int hashCode() {
+            return appKey.hashCode() ^ securityCtx.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof SecureKey
+                    && ((SecureKey) o).appKey.equals(appKey)
+                    && ((SecureKey) o).securityCtx.equals(securityCtx);
+        }
     }
 
-    Object getAppKey() {
-        return appKey;
+    //
+    // The client session implementation.
+    //
+    static class ClientSession extends SSLSessionImpl {
+        List<byte[]> statusResponses;
+
+        final SessionId clientHelloId;
+        final Queue<SessionTicket> sessionTickets = new LinkedList<>();
+
+        private ClientSession(SSLContextImpl sslContext) {
+            super(sslContext);
+            this.clientHelloId = new SessionId(new byte[0]);
+        }
+
+        private ClientSession(HandshakeContext hc,
+              CipherSuite cipherSuite, SessionId sessionId,
+              SessionId clientHelloId, long creationTime) {
+            super(hc, cipherSuite, sessionId, creationTime);
+            this.clientHelloId = clientHelloId;
+        }
+
+        static ClientSession createSession(HandshakeContext hc,
+               CipherSuite cipherSuite, SessionId sessionId,
+               SessionId clientHelloId) {
+            if (sessionId == null || sessionId.isEmpty()) {
+                sessionId = new SessionId(hc.sslContext.getSecureRandom());
+            }
+
+            return new ClientSession(hc, cipherSuite,
+                    sessionId, clientHelloId,
+                    System.currentTimeMillis());
+        }
+
+        // Provide status response data obtained during the SSL handshake.
+        void setStatusResponses(List<byte[]> responses) {
+            if (responses != null && !responses.isEmpty()) {
+                statusResponses = responses;
+            } else {
+                statusResponses = Collections.emptyList();
+            }
+        }
+
+        @Override
+        public List<byte[]> getStatusResponses() {
+            if (statusResponses == null || statusResponses.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                // Clone both the list and the contents
+                List<byte[]> responses =
+                        new ArrayList<>(statusResponses.size());
+                for (byte[] respBytes : statusResponses) {
+                    responses.add(respBytes.clone());
+                }
+
+                return Collections.unmodifiableList(responses);
+            }
+        }
+
+
+        // Used to merge session tickets of the replaced session in the cache.
+        void mergeTickets(ClientSession replacedSession) {
+            if (!replacedSession.sessionTickets.isEmpty()) {
+                sessionTickets.addAll(replacedSession.sessionTickets);
+            }
+        }
+
+        @Override
+        public boolean isValid() {
+            sessionLock.lock();
+            try {
+                if (!super.isValid()) {
+                    return false;
+                } else if (!sessionTickets.isEmpty()) {
+                    return true;
+                } else if (!this.protocolVersion.useTLS13PlusSpec()) {
+                    return sessionId != null && !sessionId.isEmpty();
+                }
+            } finally {
+                sessionLock.unlock();
+            }
+
+            // Note: For TLS 1.3, the NewSessionTicket post-handshake message
+            // may have not been transmitted, while this method get called.
+            return false;
+        }
+
+        // Note: the returned value is not cloned for performance, please
+        // don't update the returned byte array!!!
+        //
+        // Return empty byte array if no cached session ticket, or the
+        // cached session tickets have expired.
+        SessionTicket getSessionTicket() {
+            sessionLock.lock();
+            try {
+                if (this.protocolVersion.useTLS13PlusSpec()) {
+                    return getT13SessionTicket();
+                } else {        // TLS 1.2 and prior versions
+                    return getT12SessionTicket();
+                }
+            } finally {
+                sessionLock.unlock();
+            }
+        }
+
+        private SessionTicket getT13SessionTicket() {
+            // Don't reuse session ticket for TLS 1.3.
+            for (SessionTicket sessionTicket = sessionTickets.poll();
+                 sessionTicket != null;
+                 sessionTicket = sessionTickets.poll()) {
+                if (!(sessionTicket instanceof T13SessionTicket)) {
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.finest(
+                                "Removed an unexpected session ticket");
+                    }
+
+                    continue;
+                }
+
+                if (sessionTicket.expires >= System.currentTimeMillis()) {
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.finest("Got a TLS 1.3+ session ticket");
+                    }
+
+                    return sessionTicket;
+                }
+
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.finest("Removed an expired session ticket");
+                }
+            }
+
+            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                SSLLogger.finest("Found no cached TLS 1.3+ session ticket");
+            }
+
+            return null;
+        }
+
+        private SessionTicket getT12SessionTicket() {
+            // The session ticket for TLS 1.2 and prior versions could
+            // be reused if competition happens.
+            SessionTicket sessionTicket = sessionTickets.peek();
+            if (sessionTicket instanceof T13SessionTicket) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.finest("Not a TLS 1.2- session ticket");
+                }
+
+                return null;
+            }
+
+            if (sessionTicket != null &&
+                    sessionTicket.expires >= System.currentTimeMillis()) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.finest("Got a TLS 1.2- session ticket");
+                }
+                return sessionTicket;
+            }
+
+            if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                SSLLogger.finest("Found no cached TLS 1.2- session ticket");
+            }
+
+            return null;
+        }
+
+        void putSessionTicket(SessionTicket sessionTicket) {
+            sessionLock.lock();
+            try {
+                // Note: TLS 1.3 could have 1+ session ticket, while TLS 1.2
+                // and prior versions will only use the current session ticket.
+                if (!this.protocolVersion.useTLS13PlusSpec()) {
+                    // Remove the previous session tickets.
+                    sessionTickets.clear();
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.finest(
+                                "Cleared old cached session tickets");
+                    }
+
+                    sessionTickets.add(sessionTicket);
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.finest("Cached a TLS 1.2- session ticket");
+                    }
+                } else {
+                    sessionTickets.add(sessionTicket);
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.finest("Cached a TLS 1.3+ session ticket");
+                    }
+                }
+            } finally {
+                sessionLock.unlock();
+            }
+        }
+
+        // Returns the ID for this session.  The ID is fixed for the
+        // duration of the session; neither it, nor its value, changes.
+        @Override
+        public byte[] getId() {
+            return sessionId.getId();
+        }
+
+        @Override
+        public int hashCode() {
+            return sessionId.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == this) {
+                return true;
+            }
+
+            if (obj instanceof ClientSession) {
+                return this.clientHelloId == ((ClientSession)obj).clientHelloId;
+            }
+
+            return false;
+        }
     }
 
-    Object getSecurityContext() {
-        return securityCtx;
+    //
+    // The server session implementation.
+    //
+    static class ServerSession extends SSLSessionImpl {
+        private static final int DEFAULT_TICKET_NUMBER = 2;
+        final Cache<Long, T13SessionTicket> statefulTicketCache;
+
+        private ServerSession(SSLContextImpl sslContext) {
+            super(sslContext);
+            statefulTicketCache = null;
+        }
+
+        private ServerSession(HandshakeContext hc,
+                CipherSuite cipherSuite, SessionId id, long creationTime) {
+            super(hc, cipherSuite, id, creationTime);
+            statefulTicketCache = Cache.newSoftMemoryCache(
+                    DEFAULT_TICKET_NUMBER,
+                    hc.sslContext.serverCache.getSessionTimeout());
+        }
+
+        private ServerSession(
+                HandshakeContext hc,
+                SessionEncoder proxy) throws CertificateException {
+            super(hc, proxy);
+            statefulTicketCache = Cache.newSoftMemoryCache(
+                    DEFAULT_TICKET_NUMBER,
+                    hc.sslContext.serverCache.getSessionTimeout());
+        }
+
+        static ServerSession createSession(HandshakeContext hc) {
+            return new ServerSession(hc, CipherSuite.C_NULL,
+                    new SessionId(hc.sslContext.getSecureRandom()),
+                    System.currentTimeMillis());
+        }
+
+        // Check if the session worthy of cache.
+        @Override
+        boolean worthyOfCache() {
+            return super.worthyOfCache() &&
+                    sessionId != null && !sessionId.isEmpty();
+        }
+
+        // Check if the session could be resumed or rejoined, used by server
+        // handshake.
+        boolean cannotResume(ServerHandshakeContext shc) {
+            if (!isValid()) {
+                return true;
+            }
+
+            // Check protocol version
+            if (protocolVersion != shc.negotiatedProtocol) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
+                    SSLLogger.finest(
+                            "Can't resume, incorrect protocol version");
+                }
+
+                return true;
+            }
+
+            // Check cipher suite
+            if (shc.negotiatedCipherSuite != null) {
+                if (cipherSuite != shc.negotiatedCipherSuite) {
+                    if (SSLLogger.isOn &&
+                            SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest(
+                                "Can't resume, incorrect cipher suite");
+                    }
+
+                    return true;
+                }
+            } else if (!shc.activeCipherSuites.contains(cipherSuite)){
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
+                    SSLLogger.finest("Can't resume, inactive cipher suite");
+                }
+
+                return true;
+            }
+
+            // Validate the required client authentication.
+            if ((shc.sslConfig.clientAuthType ==
+                    ClientAuthType.CLIENT_AUTH_REQUIRED)) {
+                if (peerCerts == null) {
+                    if (SSLLogger.isOn &&
+                            SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest(
+                            "Can't resume, client authentication is required");
+                    }
+
+                    return true;
+                }
+
+                // Make sure the list of supported signature algorithms matches
+                if (shc.localSupportedSignAlgs == null) {
+                    shc.localSupportedSignAlgs =
+                        SignatureScheme.getSupportedAlgorithms(
+                                shc.sslConfig,
+                                shc.algorithmConstraints, shc.activeProtocols);
+                }
+                if (!shc.localSupportedSignAlgs
+                        .containsAll(localSupportedSignAlgs)) {
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.fine(
+                                "Can't resume. Session uses different " +
+                                "signature algorithms");
+                    }
+
+                    return true;
+                }
+            }
+
+            // ensure that the endpoint identification algorithm matches the
+            // one in the session
+            String identityAlg = shc.sslConfig.identificationProtocol;
+            if (identityAlg != null) {
+                if (!identityAlg.equalsIgnoreCase(identificationProtocol)) {
+                    if (SSLLogger.isOn &&
+                            SSLLogger.isOn("ssl,handshake,verbose")) {
+                        SSLLogger.finest(
+                                "Can't resume, endpoint id algorithm does " +
+                                "not match, requested: " + identityAlg +
+                                ", cached: " + identificationProtocol);
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        T13SessionTicket getStatefulSessionTicket(long ticketId) {
+            return statefulTicketCache.get(ticketId);
+        }
+
+        void putStatefulSessionTicket(long ticketId,
+                                      T13SessionTicket sessionTicket) {
+            statefulTicketCache.put(ticketId, sessionTicket);
+        }
+
+        byte[] encodeT12StatelessTicket() {
+            return encodeStatelessTicket(null);
+        }
+
+        byte[] encodeT13StatelessTicket(
+                SecretKey sharedSecret) {
+            return encodeStatelessTicket(sharedSecret);
+        }
+
+        private byte[] encodeStatelessTicket(SecretKey sharedSecret) {
+            try {
+                return (new SessionEncoder(this, sharedSecret)).encode();
+            } catch (IOException | CertificateEncodingException ioe) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.warning(
+                            "Unable encode session to ticket", ioe);
+                }
+
+                return new byte[0];
+            }
+        }
+
+        static ServerSession decodeT12StatelessTicket(
+                HandshakeContext hc, byte[] ticket) {
+            try {
+                return new ServerSession(hc,
+                        SessionEncoder.decode(ByteBuffer.wrap(ticket)));
+            } catch (IOException | CertificateException ioe) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.warning(
+                            "Cannot decode session from ticket", ioe);
+                }
+
+                return null;
+            }
+        }
+
+        static Map.Entry<SecretKey, ServerSession> decodeT13StatelessTicket(
+                HandshakeContext hc, byte[] ticket) {
+            try {
+                ServerSession session = new ServerSession(hc,
+                        SessionEncoder.decode(ByteBuffer.wrap(ticket)));
+                SecretKey sharedSecret = session.masterSecret;
+                session.masterSecret = null;
+
+                return new AbstractMap.SimpleEntry<>(sharedSecret, session);
+            } catch (IOException |
+                    CertificateException ioe) {
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.warning(
+                            "Cannot decode session from ticket", ioe);
+                }
+
+                return null;
+            }
+        }
+
+        // Returns the ID for this session.  The ID is fixed for the
+        // duration of the session; neither it, nor its value, changes.
+        @Override
+        public byte[] getId() {
+            return sessionId.getId();
+        }
+
+        @Override
+        public int hashCode() {
+            return sessionId.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == this) {
+                return true;
+            }
+
+            if (obj instanceof ServerSession) {
+                return (sessionId != null) &&
+                        (sessionId.equals(((ServerSession)obj).sessionId));
+            }
+
+            return false;
+        }
     }
 
-    @Override
-    public int hashCode() {
-        return appKey.hashCode() ^ securityCtx.hashCode();
-    }
+    private static class SessionEncoder {
+        // Copy of session status.
+        //
+        // Note: The default serialization should be able to use these fields.
+        private final ProtocolVersion               protocolVersion;
+        private final byte[]                        sessionId;
+        private final long                          creationTime;
+        private final int                           sniType;
+        private final byte[]                        sniEncoded;
+        private final HashMap<Integer, byte[]>      requestedServerNames;
+        private final String                        identificationProtocol;
+        private final boolean                       useExtendedMasterSecret;
+        private final byte[][]                      peerCerts;
+        private final CipherSuite                   cipherSuite;
+        private final SecretKey                     masterSecret;
+        private final String                        localPrivateKeyAlias;
+        private final Collection<SignatureScheme>   localSupportedSignAlgs;
+        private final Collection<SignatureScheme>   peerSupportedSignAlgs;
+        private final boolean                       useDefaultPeerSignAlgs;
+        private final int                           negotiatedMaxFragLen;
+        private final int                           maximumPacketSize;
 
-    @Override
-    public boolean equals(Object o) {
-        return o instanceof SecureKey && ((SecureKey)o).appKey.equals(appKey)
-                        && ((SecureKey)o).securityCtx.equals(securityCtx);
+        private SessionEncoder(
+                final ProtocolVersion               protocolVersion,
+                final byte[] sessionId,
+                final long                          creationTime,
+                final int                           sniType,
+                final byte[]                        sniEncoded,
+                final HashMap<Integer, byte[]>      requestedServerNames,
+                final String                        identificationProtocol,
+                final boolean                       useExtendedMasterSecret,
+                final byte[][]                      peerCerts,
+                final CipherSuite                   cipherSuite,
+                final SecretKey                     masterSecret,
+                final String                        localPrivateKeyAlias,
+                final Collection<SignatureScheme>   localSupportedSignAlgs,
+                final Collection<SignatureScheme>   peerSupportedSignAlgs,
+                final boolean                       useDefaultPeerSignAlgs,
+                final int                           negotiatedMaxFragLen,
+                final int                           maximumPacketSize
+        ) {
+            this.protocolVersion = protocolVersion;
+            this.sessionId = sessionId;
+            this.creationTime = creationTime;
+            this.sniType = sniType;
+            this.sniEncoded = sniEncoded;
+            this.requestedServerNames = requestedServerNames;
+            this.identificationProtocol = identificationProtocol;
+            this.useExtendedMasterSecret = useExtendedMasterSecret;
+            this.peerCerts = peerCerts;
+            this.cipherSuite = cipherSuite;
+            this.masterSecret = masterSecret;
+            this.localPrivateKeyAlias = localPrivateKeyAlias;
+            this.localSupportedSignAlgs = localSupportedSignAlgs;
+            this.peerSupportedSignAlgs = peerSupportedSignAlgs;
+            this.useDefaultPeerSignAlgs = useDefaultPeerSignAlgs;
+            this.negotiatedMaxFragLen = negotiatedMaxFragLen;
+            this.maximumPacketSize = maximumPacketSize;
+        }
+
+        private SessionEncoder(
+                ServerSession session,
+                SecretKey shareSecret) throws CertificateEncodingException {
+            this.protocolVersion = session.protocolVersion;
+
+            if (session.sessionId != null) {
+                this.sessionId = session.sessionId.getId();
+            } else {
+                this.sessionId = null;
+            }
+
+            this.creationTime = session.getCreationTime();
+            if (session.serverNameIndication != null) {
+                this.sniType = session.serverNameIndication.getType();
+                this.sniEncoded = session.serverNameIndication.getEncoded();
+            } else {
+                this.sniType = -1;
+                this.sniEncoded = null;
+            }
+
+            this.requestedServerNames = new HashMap<>(
+                    session.requestedServerNames.size());
+            for (SNIServerName sni : session.requestedServerNames) {
+                requestedServerNames.put(sni.getType(), sni.getEncoded());
+            }
+
+            this.identificationProtocol = session.identificationProtocol;
+            this.useExtendedMasterSecret = session.useExtendedMasterSecret;
+            if (session.peerCerts != null) {
+                this.peerCerts = new byte[session.peerCerts.length][];
+                for (int i = 0; i < session.peerCerts.length; i++) {
+                    this.peerCerts[i] = session.peerCerts[i].getEncoded();
+                }
+            } else {
+                this.peerCerts = null;
+            }
+
+            this.cipherSuite = session.cipherSuite;
+            if (protocolVersion.useTLS13PlusSpec()) {
+                this.masterSecret = shareSecret;
+            } else {
+                this.masterSecret = session.masterSecret;
+            }
+
+            this.localPrivateKeyAlias = session.localPrivateKeyAlias;
+            this.localSupportedSignAlgs = session.localSupportedSignAlgs;
+            this.peerSupportedSignAlgs = session.peerSupportedSignAlgs;
+            this.useDefaultPeerSignAlgs = session.useDefaultPeerSignAlgs;
+
+            this.negotiatedMaxFragLen = session.negotiatedMaxFragLen;
+            this.maximumPacketSize = session.maximumPacketSize;
+        }
+
+        private byte[] encode() throws IOException {
+            HandshakeOutStream hos = new HandshakeOutStream(null);
+
+            hos.putInt16(protocolVersion.id);
+            hos.putBytes8(sessionId);
+            hos.putInt64(creationTime);
+            hos.putInt8(sniType);
+            hos.putBytes16(sniEncoded);
+
+            int size = 0;
+            for (Map.Entry<Integer, byte[]> sni :
+                    requestedServerNames.entrySet()) {
+                size += sni.getValue().length + 3;
+            }
+            hos.putInt16(size);
+            for (Map.Entry<Integer, byte[]> sni :
+                    requestedServerNames.entrySet()) {
+                hos.putInt8(sni.getKey());
+                hos.putBytes16(sni.getValue());
+            }
+
+            if (identificationProtocol != null) {
+                hos.putBytes8(identificationProtocol.getBytes());
+            } else {
+                hos.putBytes8(new byte[0]);
+            }
+            hos.putInt8(useExtendedMasterSecret ? (byte)1 : (byte)0);
+
+            if (peerCerts == null) {
+                hos.putInt24(0);
+            } else {
+                size = 0;
+                for (byte[] cert : peerCerts) {
+                    size += cert.length + 3;
+                }
+
+                hos.putInt24(size);
+                for (byte[] cert : peerCerts) {
+                    hos.putBytes24(cert);
+                }
+            }
+
+            hos.putInt16(cipherSuite.id);
+
+            byte[] encodedKey = masterSecret.getEncoded();
+            hos.putBytes16(encodedKey);
+
+            if (localPrivateKeyAlias != null) {
+                hos.putBytes8(localPrivateKeyAlias.getBytes());
+            } else {
+                hos.putBytes8(new byte[0]);
+            }
+
+            hos.putInt16(localSupportedSignAlgs.size() * 2);
+            for (SignatureScheme ss : localSupportedSignAlgs) {
+                hos.putInt16(ss.id);
+            }
+
+            hos.putInt16(peerSupportedSignAlgs.size() * 2);
+            for (SignatureScheme ss : peerSupportedSignAlgs) {
+                hos.putInt16(ss.id);
+            }
+
+            hos.putInt8(useDefaultPeerSignAlgs ? (byte)1 : (byte)0);
+
+            hos.putInt16(negotiatedMaxFragLen);
+            hos.putInt16(maximumPacketSize);
+
+            return hos.toByteArray();
+        }
+
+        private static SessionEncoder decode(ByteBuffer m) throws IOException {
+            ProtocolVersion protocolVersion =
+                    ProtocolVersion.valueOf(Record.getInt16(m));
+            byte[] sessionId = Record.getBytes8(m);
+            long creationTime = Record.getInt64(m);
+            int sniType = Record.getInt8(m);
+            byte[] sniEncoded = Record.getBytes16(m);
+
+            int size = Record.getInt16(m);
+            HashMap<Integer, byte[]> requestedServerNames = new HashMap<>();
+            while (size > 0) {
+                int nameType = Record.getInt8(m);
+                byte[] sniName = Record.getBytes16(m);
+                size -= 3 + sniName.length;
+                requestedServerNames.put(nameType, sniName);
+            }
+
+            String identificationProtocol = new String(Record.getBytes8(m));
+            boolean useExtendedMasterSecret = Record.getInt8(m) != 0;
+
+            size = Record.getInt24(m);
+            ArrayList<byte[]> certs = new ArrayList<>();
+            while (size > 0) {
+                byte[] cert = Record.getBytes24(m);
+                size -= 3 + cert.length;
+                certs.add(cert);
+            }
+            byte[][] peerCerts = certs.toArray(new byte[0][]);
+
+            CipherSuite cipherSuite = CipherSuite.valueOf(Record.getInt16(m));
+
+            SecretKey masterSecret;
+            if (protocolVersion != null && protocolVersion.useTLS13PlusSpec()) {
+                masterSecret =
+                    new SecretKeySpec(Record.getBytes16(m), "TlsResumption");
+            } else {
+                masterSecret =
+                    new SecretKeySpec(Record.getBytes16(m), "TlsMasterSecret");
+            }
+            String localPrivateKeyAlias = new String(Record.getBytes8(m));
+
+
+            size = Record.getInt16(m);
+            List<SignatureScheme> localSupportedSignAlgs = new LinkedList<>();
+            while (size > 0) {
+                size -= 2;
+                localSupportedSignAlgs.add(
+                        SignatureScheme.valueOf(Record.getInt16(m)));
+            }
+
+            size = Record.getInt16(m);
+            List<SignatureScheme> peerSupportedSignAlgs = new LinkedList<>();
+            while (size > 0) {
+                size -= 2;
+                peerSupportedSignAlgs.add(
+                        SignatureScheme.valueOf(Record.getInt16(m)));
+            }
+
+            boolean useDefaultPeerSignAlgs = Record.getInt8(m) != 0;
+
+            int negotiatedMaxFragLen = Record.getInt16(m);
+            if (negotiatedMaxFragLen > Short.MAX_VALUE) {
+                negotiatedMaxFragLen = -1;
+            }
+            int maximumPacketSize = Record.getInt16(m);
+            if(maximumPacketSize > Short.MAX_VALUE) {
+                maximumPacketSize = -1;
+            }
+
+            return new SessionEncoder(protocolVersion,
+                    sessionId, creationTime, sniType, sniEncoded,
+                    requestedServerNames, identificationProtocol,
+                    useExtendedMasterSecret, peerCerts,
+                    cipherSuite, masterSecret, localPrivateKeyAlias,
+                    localSupportedSignAlgs, peerSupportedSignAlgs,
+                    useDefaultPeerSignAlgs,
+                    negotiatedMaxFragLen, maximumPacketSize);
+        }
     }
 }

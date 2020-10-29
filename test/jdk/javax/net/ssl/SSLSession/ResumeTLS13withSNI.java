@@ -114,6 +114,9 @@ public class ResumeTLS13withSNI {
         // Create a new client-side engine which can initiate TLS session
         // resumption
         SSLEngine newCliEngine = makeEngine(sslCtx, kmf, tmf, true);
+        cliSSLParams = newCliEngine.getSSLParameters();
+        cliSSLParams.setServerNames(List.of(SNI_NAME));
+        newCliEngine.setSSLParameters(cliSSLParams);
         newCliEngine.setEnabledProtocols(new String[] { "TLSv1.3" });
         ByteBuffer resCliHello = getResumptionClientHello(newCliEngine);
 

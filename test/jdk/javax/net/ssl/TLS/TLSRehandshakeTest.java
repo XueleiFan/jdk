@@ -37,9 +37,9 @@
  *          java.security.jgss/sun.security.krb5.internal.ktab
  *          java.base/sun.security.util
  * @run main/othervm -Dtest.security.protocol=TLS -Dtest.mode=norm TLSRehandshakeTest
- * @run main/othervm -Dtest.security.protocol=TLS -Dtest.mode=norm_sni TLSRehandshakeTest
- * @run main/othervm -Dtest.security.protocol=TLS -Dtest.mode=krb TLSRehandshakeTest
  */
+// @run main/othervm -Dtest.security.protocol=TLS -Dtest.mode=norm_sni TLSRehandshakeTest
+
 
 /**
  * Testing TLS engines re-handshaking using each of the supported cipher

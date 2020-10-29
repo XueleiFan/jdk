@@ -63,11 +63,11 @@ final class CertificateAuthoritiesExtension {
             this.authorities = authorities;
         }
 
-        private CertificateAuthoritiesSpec(HandshakeContext hc,
+        private CertificateAuthoritiesSpec(TransportContext tc,
                 ByteBuffer m) throws IOException  {
             if (m.remaining() < 3) {        // 2: the length of the list
                                             // 1: at least one byte authorities
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid certificate_authorities extension: " +
                     "insufficient data"));
@@ -75,13 +75,13 @@ final class CertificateAuthoritiesExtension {
 
             int listLen = Record.getInt16(m);
             if (listLen == 0) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                     "Invalid certificate_authorities extension: " +
                     "no certificate authorities");
             }
 
             if (listLen > m.remaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                     "Invalid certificate_authorities extension: " +
                     "insufficient data");
             }
@@ -153,9 +153,9 @@ final class CertificateAuthoritiesExtension {
     private static final
             class CertificateAuthoritiesStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CertificateAuthoritiesSpec(hc, buffer))
+                return (new CertificateAuthoritiesSpec(tc, buffer))
                         .toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
@@ -274,7 +274,7 @@ final class CertificateAuthoritiesExtension {
 
             // Parse the extension.
             CertificateAuthoritiesSpec spec =
-                    new CertificateAuthoritiesSpec(shc, buffer);
+                    new CertificateAuthoritiesSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.peerSupportedAuthorities = spec.getAuthorities();
@@ -395,7 +395,7 @@ final class CertificateAuthoritiesExtension {
 
             // Parse the extension.
             CertificateAuthoritiesSpec spec =
-                    new CertificateAuthoritiesSpec(chc, buffer);
+                    new CertificateAuthoritiesSpec(chc.conContext, buffer);
 
             // Update the context.
             chc.peerSupportedAuthorities = spec.getAuthorities();

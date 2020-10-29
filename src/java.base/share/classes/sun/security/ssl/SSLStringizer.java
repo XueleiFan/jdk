@@ -37,5 +37,5 @@ interface SSLStringizer {
      * Note that the implementation MUST not change the internal status of
      * the {@code buffer}.
      */
-    String toString(HandshakeContext handshakeContext, ByteBuffer buffer);
+    String toString(TransportContext transportContext, ByteBuffer buffer);
 }

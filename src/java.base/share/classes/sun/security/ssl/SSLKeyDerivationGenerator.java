@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,13 @@ import java.io.IOException;
 import javax.crypto.SecretKey;
 
 interface SSLKeyDerivationGenerator {
+    // Used for handshake key derivation.
     SSLKeyDerivation createKeyDerivation(HandshakeContext context,
             SecretKey secretKey) throws IOException;
+
+    // Used for post-handshake key derivation.
+    default SSLKeyDerivation createKeyDerivation(TransportContext context,
+            SecretKey secretKey) throws IOException {
+        throw new UnsupportedOperationException();
+    }
 }

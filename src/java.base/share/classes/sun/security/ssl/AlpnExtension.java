@@ -68,15 +68,14 @@ final class AlpnExtension {
         final List<String> applicationProtocols;
 
         private AlpnSpec(String[] applicationProtocols) {
-            this.applicationProtocols = Collections.unmodifiableList(
-                    Arrays.asList(applicationProtocols));
+            this.applicationProtocols = List.of(applicationProtocols);
         }
 
-        private AlpnSpec(HandshakeContext hc,
+        private AlpnSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             // ProtocolName protocol_name_list<2..2^16-1>, RFC 7301.
             if (buffer.remaining() < 2) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid application_layer_protocol_negotiation: " +
                     "insufficient data (length=" + buffer.remaining() + ")"));
@@ -84,7 +83,7 @@ final class AlpnExtension {
 
             int listLen = Record.getInt16(buffer);
             if (listLen < 2 || listLen != buffer.remaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid application_layer_protocol_negotiation: " +
                     "incorrect list length (length=" + listLen + ")"));
@@ -95,7 +94,7 @@ final class AlpnExtension {
                 // opaque ProtocolName<1..2^8-1>, RFC 7301.
                 byte[] bytes = Record.getBytes8(buffer);
                 if (bytes.length == 0) {
-                    throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                    throw tc.fatal(Alert.DECODE_ERROR,
                             new SSLProtocolException(
                         "Invalid application_layer_protocol_negotiation " +
                         "extension: empty application protocol name"));
@@ -117,9 +116,9 @@ final class AlpnExtension {
 
     private static final class AlpnStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new AlpnSpec(hc, buffer)).toString();
+                return (new AlpnSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -286,7 +285,7 @@ final class AlpnExtension {
             }
 
             // Parse the extension.
-            AlpnSpec spec = new AlpnSpec(shc, buffer);
+            AlpnSpec spec = new AlpnSpec(shc.conContext, buffer);
 
             // Update the context.
             if (noAPSelector) {     // noAlpnProtocols is false
@@ -462,7 +461,7 @@ final class AlpnExtension {
             }
 
             // Parse the extension.
-            AlpnSpec spec = new AlpnSpec(chc, buffer);
+            AlpnSpec spec = new AlpnSpec(chc.conContext, buffer);
 
             // Only one application protocol is allowed.
             if (spec.applicationProtocols.size() != 1) {

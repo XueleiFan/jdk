@@ -56,9 +56,9 @@ final class CertSignAlgsExtension {
     private static final
             class CertSignatureSchemesStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SignatureSchemesSpec(hc, buffer))
+                return (new SignatureSchemesSpec(tc, buffer))
                         .toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
@@ -151,7 +151,8 @@ final class CertSignAlgsExtension {
             }
 
             // Parse the extension.
-            SignatureSchemesSpec spec = new SignatureSchemesSpec(shc, buffer);
+            SignatureSchemesSpec spec =
+                    new SignatureSchemesSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(
@@ -291,7 +292,8 @@ final class CertSignAlgsExtension {
             }
 
             // Parse the extension.
-            SignatureSchemesSpec spec = new SignatureSchemesSpec(chc, buffer);
+            SignatureSchemesSpec spec =
+                    new SignatureSchemesSpec(chc.conContext, buffer);
 
             // Update the context.
             chc.handshakeExtensions.put(

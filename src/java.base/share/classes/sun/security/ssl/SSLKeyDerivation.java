@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,10 +26,27 @@
 package sun.security.ssl;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.security.spec.AlgorithmParameterSpec;
 import javax.crypto.SecretKey;
 
 interface SSLKeyDerivation {
     SecretKey deriveKey(String algorithm,
             AlgorithmParameterSpec params) throws IOException;
+
+    static byte[] createHkdfInfo(
+            byte[] label, byte[] context, int length) {
+        byte[] info = new byte[4 + label.length + context.length];
+        ByteBuffer m = ByteBuffer.wrap(info);
+        try {
+            Record.putInt16(m, length);
+            Record.putBytes8(m, label);
+            Record.putBytes8(m, context);
+        } catch (IOException ioe) {
+            // unlikely
+            throw new RuntimeException("Unexpected exception", ioe);
+        }
+
+        return info;
+    }
 }

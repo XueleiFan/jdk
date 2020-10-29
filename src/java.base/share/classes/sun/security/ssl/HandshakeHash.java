@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -109,11 +109,6 @@ final class HandshakeHash {
         reserves.push(Arrays.copyOf(input, input.length));
     }
 
-    // For PreSharedKey to modify the state of the PSK binder hash
-    byte[] removeLastReceived() {
-        return reserves.removeLast();
-    }
-
     void deliver(byte[] input) {
         update();
         transcriptHash.update(input, 0, input.length);
@@ -167,6 +162,20 @@ final class HandshakeHash {
             byte[] holder = reserves.remove();
             transcriptHash.update(holder, 0, holder.length);
         }
+
+        hasBeenUsed = false;
+    }
+
+    void updateWithLastMessageTruncated(int truncatedSize) {
+        while (reserves.size() != 0) {
+            byte[] holder = reserves.remove();
+            if (reserves.size() != 0) {
+                transcriptHash.update(holder, 0, holder.length);
+            } else {
+                transcriptHash.update(holder, 0, holder.length - truncatedSize);
+            }
+        }
+
         hasBeenUsed = false;
     }
 

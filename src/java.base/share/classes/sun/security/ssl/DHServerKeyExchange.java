@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -81,12 +81,11 @@ final class DHServerKeyExchange {
         private final byte[] paramsSignature;
 
         DHServerKeyExchangeMessage(
-                HandshakeContext handshakeContext) throws IOException {
-            super(handshakeContext);
+                HandshakeContext hc) throws IOException {
+            super(hc.conContext);
 
             // This happens in server side only.
-            ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             DHEPossession dhePossession = null;
             X509Possession x509Possession = null;
@@ -169,13 +168,12 @@ final class DHServerKeyExchange {
             }
         }
 
-        DHServerKeyExchangeMessage(HandshakeContext handshakeContext,
+        DHServerKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // This happens in client side only.
-            ClientHandshakeContext chc =
-                    (ClientHandshakeContext)handshakeContext;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
 
             this.p = Record.getBytes16(m);
             this.g = Record.getBytes16(m);

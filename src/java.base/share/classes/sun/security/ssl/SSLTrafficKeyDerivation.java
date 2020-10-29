@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,7 +26,6 @@
 package sun.security.ssl;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.security.ProviderException;
 import java.security.spec.AlgorithmParameterSpec;
@@ -75,6 +74,12 @@ enum SSLTrafficKeyDerivation implements SSLKeyDerivationGenerator {
 
     @Override
     public SSLKeyDerivation createKeyDerivation(HandshakeContext context,
+            SecretKey secretKey) throws IOException {
+        return keyDerivationGenerator.createKeyDerivation(context, secretKey);
+    }
+
+    @Override
+    public SSLKeyDerivation createKeyDerivation(TransportContext context,
             SecretKey secretKey) throws IOException {
         return keyDerivationGenerator.createKeyDerivation(context, secretKey);
     }
@@ -130,6 +135,12 @@ enum SSLTrafficKeyDerivation implements SSLKeyDerivationGenerator {
                 SecretKey secretKey) throws IOException {
             return new T13TrafficKeyDerivation(context, secretKey);
         }
+
+        @Override
+        public SSLKeyDerivation createKeyDerivation(TransportContext context,
+                SecretKey secretKey) throws IOException {
+            return new T13TrafficKeyDerivation(context, secretKey);
+        }
     }
 
     static final class T13TrafficKeyDerivation implements SSLKeyDerivation {
@@ -142,15 +153,33 @@ enum SSLTrafficKeyDerivation implements SSLKeyDerivationGenerator {
             this.cs = context.negotiatedCipherSuite;
         }
 
+        T13TrafficKeyDerivation(
+                TransportContext context, SecretKey secret) {
+            this.secret = secret;
+            this.cs = context.conSession.getSuite();
+        }
+
         @Override
         public SecretKey deriveKey(String algorithm,
                 AlgorithmParameterSpec params) throws IOException {
             KeySchedule ks = KeySchedule.valueOf(algorithm);
             try {
-                HKDF hkdf = new HKDF(cs.hashAlg.name);
+                byte[] expandContext;
+                if (ks.requireContext) {
+                    if (params == null ||
+                            !(params instanceof IvParameterSpec)) {
+                        throw new SSLHandshakeException(
+                                "Need nonce or IV parameters");
+                    }
+                    expandContext = ((IvParameterSpec)params).getIV();
+                } else {
+                    expandContext = new byte[0];
+                }
+
                 byte[] hkdfInfo =
-                        createHkdfInfo(ks.label, ks.getKeyLength(cs));
-                return hkdf.expand(secret, hkdfInfo,
+                        SSLKeyDerivation.createHkdfInfo(
+                                ks.label, expandContext, ks.getKeyLength(cs));
+                return HKDF.of(cs.hashAlg.name).expand(secret, hkdfInfo,
                         ks.getKeyLength(cs),
                         ks.getAlgorithm(cs, algorithm));
             } catch (GeneralSecurityException gse) {
@@ -158,46 +187,40 @@ enum SSLTrafficKeyDerivation implements SSLKeyDerivationGenerator {
                     "Could not generate secret").initCause(gse));
             }
         }
-
-        private static byte[] createHkdfInfo(
-                byte[] label, int length) throws IOException {
-            byte[] info = new byte[4 + label.length];
-            ByteBuffer m = ByteBuffer.wrap(info);
-            try {
-                Record.putInt16(m, length);
-                Record.putBytes8(m, label);
-                Record.putInt8(m, 0x00);    // zero-length context
-            } catch (IOException ioe) {
-                // unlikely
-                throw new RuntimeException("Unexpected exception", ioe);
-            }
-
-            return info;
-        }
     }
 
     private enum KeySchedule {
         // Note that we use enum name as the key/ name.
-        TlsKey              ("key", false),
-        TlsIv               ("iv",  true),
+        TlsKey              ("key",         false),
+        TlsIv               ("iv",          false),
+        TlsResumption       ("resumption",  true),
+        TlsFinished         ("finished",    false),
         TlsUpdateNplus1     ("traffic upd", false);
 
         private final byte[] label;
-        private final boolean isIv;
+        private final boolean requireContext;
 
-        private KeySchedule(String label, boolean isIv) {
+        KeySchedule(String label, boolean requireContext) {
             this.label = ("tls13 " + label).getBytes();
-            this.isIv = isIv;
+            this.requireContext = requireContext;
         }
 
         int getKeyLength(CipherSuite cs) {
-            if (this == KeySchedule.TlsUpdateNplus1)
+            if (this == KeySchedule.TlsIv) {
+                return cs.bulkCipher.ivSize;
+            } else if (this == KeySchedule.TlsKey) {
+                return cs.bulkCipher.keySize;
+            } else {
                 return cs.hashAlg.hashLength;
-            return isIv ? cs.bulkCipher.ivSize : cs.bulkCipher.keySize;
+            }
         }
 
         String getAlgorithm(CipherSuite cs, String algorithm) {
-            return isIv ? algorithm : cs.bulkCipher.algorithm;
+            if (this == KeySchedule.TlsKey) {
+                return cs.bulkCipher.algorithm;
+            }
+
+            return algorithm;
         }
     }
 

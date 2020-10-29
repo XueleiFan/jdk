@@ -243,9 +243,9 @@ enum SSLExtension implements SSLStringizer {
     EE_ALPN                 (0x0010, "application_layer_protocol_negotiation",
                                 SSLHandshake.ENCRYPTED_EXTENSIONS,
                                 ProtocolVersion.PROTOCOLS_OF_13,
-                                AlpnExtension.shNetworkProducer,
-                                AlpnExtension.shOnLoadConsumer,
-                                AlpnExtension.shOnLoadAbsence,
+                                AlpnExtension.eeNetworkProducer,
+                                AlpnExtension.eeOnLoadConsumer,
+                                AlpnExtension.eeOnLoadAbsence,
                                 null,
                                 null,
                                 AlpnExtension.alpnStringizer),
@@ -311,26 +311,24 @@ enum SSLExtension implements SSLStringizer {
 
     // extensions defined in RFC 5077
     CH_SESSION_TICKET       (0x0023, "session_ticket",
-            SSLHandshake.CLIENT_HELLO,
-            ProtocolVersion.PROTOCOLS_10_12,
-            SessionTicketExtension.chNetworkProducer,
-            SessionTicketExtension.chOnLoadConsumer,
-            null,
-            null,
-            null,
-            SessionTicketExtension.steStringizer),
-            //null),
+                                SSLHandshake.CLIENT_HELLO,
+                                ProtocolVersion.PROTOCOLS_10_12,
+                                SessionTicketExtension.chNetworkProducer,
+                                SessionTicketExtension.chOnLoadConsumer,
+                                null,
+                                null,
+                                null,
+                                null),      // use the default stringizer
 
     SH_SESSION_TICKET       (0x0023, "session_ticket",
-            SSLHandshake.SERVER_HELLO,
-            ProtocolVersion.PROTOCOLS_10_12,
-            SessionTicketExtension.shNetworkProducer,
-            SessionTicketExtension.shOnLoadConsumer,
-            null,
-            null,
-            null,
-            SessionTicketExtension.steStringizer),
-            //null),
+                                SSLHandshake.SERVER_HELLO,
+                                ProtocolVersion.PROTOCOLS_10_12,
+                                SessionTicketExtension.shNetworkProducer,
+                                SessionTicketExtension.shOnLoadConsumer,
+                                null,
+                                null,
+                                null,
+                                null),      // use the default stringizer
 
     // extensions defined in TLS 1.3
     CH_EARLY_DATA           (0x002A, "early_data"),
@@ -404,7 +402,7 @@ enum SSLExtension implements SSLStringizer {
                                 PskKeyExchangeModesExtension.chNetworkProducer,
                                 PskKeyExchangeModesExtension.chOnLoadConsumer,
                                 PskKeyExchangeModesExtension.chOnLoadAbsence,
-                                null,
+                                PskKeyExchangeModesExtension.chOnTradeConsumer,
                                 PskKeyExchangeModesExtension.chOnTradeAbsence,
                                 PskKeyExchangeModesExtension.pkemStringizer),
 
@@ -436,7 +434,7 @@ enum SSLExtension implements SSLStringizer {
                                 ProtocolVersion.PROTOCOLS_OF_13,
                                 KeyShareExtension.chNetworkProducer,
                                 KeyShareExtension.chOnLoadConsumer,
-                                null,
+                                KeyShareExtension.chOnLoadAbsence,
                                 null,
                                 KeyShareExtension.chOnTradAbsence,
                                 KeyShareExtension.chStringizer),
@@ -552,7 +550,7 @@ enum SSLExtension implements SSLStringizer {
             HandshakeProducer producer,
             ExtensionConsumer onLoadConsumer, HandshakeAbsence onLoadAbsence,
             HandshakeConsumer onTradeConsumer, HandshakeAbsence onTradeAbsence,
-            SSLStringizer stringize) {
+            SSLStringizer stringizer) {
         this.id = id;
         this.handshakeType = handshakeType;
         this.name = name;
@@ -562,7 +560,7 @@ enum SSLExtension implements SSLStringizer {
         this.onLoadAbsence = onLoadAbsence;
         this.onTradeConsumer = onTradeConsumer;
         this.onTradeAbsence = onTradeAbsence;
-        this.stringizer = stringize;
+        this.stringizer = stringizer;
     }
 
     static SSLExtension valueOf(SSLHandshake handshakeType, int extensionType) {
@@ -664,7 +662,7 @@ enum SSLExtension implements SSLStringizer {
 
     @Override
     public String toString(
-            HandshakeContext handshakeContext, ByteBuffer byteBuffer) {
+            TransportContext transportContext, ByteBuffer byteBuffer) {
         MessageFormat messageFormat = new MessageFormat(
             "\"{0} ({1})\": '{'\n" +
             "{2}\n" +
@@ -673,11 +671,15 @@ enum SSLExtension implements SSLStringizer {
 
         String extData;
         if (stringizer == null) {
-            HexDumpEncoder hexEncoder = new HexDumpEncoder();
-            String encoded = hexEncoder.encode(byteBuffer.duplicate());
-            extData = encoded;
+            if (byteBuffer.hasRemaining()) {
+                HexDumpEncoder hexEncoder = new HexDumpEncoder();
+                String encoded = hexEncoder.encode(byteBuffer.duplicate());
+                extData = encoded;
+            } else {
+                extData = "<empty extension>";
+            }
         } else {
-            extData = stringizer.toString(handshakeContext, byteBuffer);
+            extData = stringizer.toString(transportContext, byteBuffer);
         }
 
         Object[] messageFields = {
@@ -789,6 +791,12 @@ enum SSLExtension implements SSLStringizer {
                 extensions.remove(CH_CERTIFICATE_AUTHORITIES);
             }
 
+            enableExtension = Utilities.getBooleanProperty(
+                    "jdk.tls.client.enableSessionTicketExtension", true);
+            if (!enableExtension) {
+                extensions.remove(CH_SESSION_TICKET);
+            }
+
             defaults = Collections.unmodifiableCollection(extensions);
         }
     }
@@ -803,6 +811,12 @@ enum SSLExtension implements SSLStringizer {
                 if (extension.handshakeType != SSLHandshake.NOT_APPLICABLE) {
                     extensions.add(extension);
                 }
+            }
+
+            boolean enableExtension = Utilities.getBooleanProperty(
+                    "jdk.tls.server.enableSessionTicketExtension", true);
+            if (!enableExtension) {
+                extensions.remove(SH_SESSION_TICKET);
             }
 
             defaults = Collections.unmodifiableCollection(extensions);

@@ -27,34 +27,49 @@
  * @bug 8242008
  * @summary Verify SSLSession.getSessionContext() is not null for the initial
  *          and the resumed session
- * @run main/othervm -Djdk.tls.client.protocols=TLSv1.2 -Djdk.tls.server.enableSessionTicketExtension=true -Djdk.tls.client.enableSessionTicketExtension=false CheckSessionContext
- * @run main/othervm -Djdk.tls.client.protocols=TLSv1.2 -Djdk.tls.server.enableSessionTicketExtension=true -Djdk.tls.client.enableSessionTicketExtension=true CheckSessionContext
- * @run main/othervm -Djdk.tls.client.protocols=TLSv1.3 -Djdk.tls.server.enableSessionTicketExtension=true -Djdk.tls.client.enableSessionTicketExtension=false CheckSessionContext
- * @run main/othervm -Djdk.tls.client.protocols=TLSv1.3 -Djdk.tls.server.enableSessionTicketExtension=true -Djdk.tls.client.enableSessionTicketExtension=true CheckSessionContext
+ * @run main/othervm -Djdk.tls.client.protocols=TLSv1.2
+ *      -Djdk.tls.server.enableSessionTicketExtension=true
+ *      -Djdk.tls.client.enableSessionTicketExtension=false CheckSessionContext
+ * @run main/othervm -Djdk.tls.client.protocols=TLSv1.2
+ *      -Djdk.tls.server.enableSessionTicketExtension=true
+ *      -Djdk.tls.client.enableSessionTicketExtension=true CheckSessionContext
+ * @run main/othervm -Djdk.tls.client.protocols=TLSv1.3
+ *      -Djdk.tls.server.enableSessionTicketExtension=true
+ *      -Djdk.tls.client.enableSessionTicketExtension=true CheckSessionContext
  *
  */
 
 public class CheckSessionContext {
 
     public static void main(String[] args) throws Exception {
+        boolean useSessionTicket = "true".equals(
+            System.getProperty("jdk.tls.server.enableSessionTicketExtension"));
+        useSessionTicket &=  "true".equals(
+            System.getProperty("jdk.tls.client.enableSessionTicketExtension"));
+
         TLSBase.Server server = new TLSBase.Server();
 
         // Initial client session
         TLSBase.Client client1 = new TLSBase.Client();
-        if (server.getSession(client1).getSessionContext() == null) {
-            throw new Exception("Context was null");
-        } else {
-            System.out.println("Context was found");
+
+        if (!useSessionTicket) {
+            if (server.getSession(client1).getSessionContext() == null) {
+                throw new Exception("Context was null");
+            } else {
+                System.out.println("Context was found");
+            }
         }
         server.close(client1);
         client1.close();
 
         // Resume the client session
         TLSBase.Client client2 = new TLSBase.Client();
-        if (server.getSession(client2).getSessionContext() == null) {
-            throw new Exception("Context was null on resumption");
-        } else {
-            System.out.println("Context was found on resumption");
+        if (!useSessionTicket) {
+            if (server.getSession(client2).getSessionContext() == null) {
+                throw new Exception("Context was null on resumption");
+            } else {
+                System.out.println("Context was found on resumption");
+            }
         }
         server.close(client2);
         client2.close();

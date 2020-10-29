@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -68,16 +68,16 @@ final class ECDHClientKeyExchange {
             class ECDHClientKeyExchangeMessage extends HandshakeMessage {
         private final byte[] encodedPoint;
 
-        ECDHClientKeyExchangeMessage(HandshakeContext handshakeContext,
+        ECDHClientKeyExchangeMessage(HandshakeContext hc,
                 byte[] encodedPublicKey) {
-            super(handshakeContext);
+            super(hc.conContext);
 
             this.encodedPoint = encodedPublicKey;
         }
 
-        ECDHClientKeyExchangeMessage(HandshakeContext handshakeContext,
+        ECDHClientKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
             if (m.remaining() != 0) {       // explicit PublicValueEncoding
                 this.encodedPoint = Record.getBytes8(m);
             } else {

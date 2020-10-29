@@ -26,19 +26,22 @@
 package sun.security.ssl;
 
 import java.io.IOException;
+import java.nio.BufferOverflowException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import javax.crypto.SecretKey;
 import javax.net.ssl.HandshakeCompletedEvent;
 import javax.net.ssl.HandshakeCompletedListener;
 import javax.net.ssl.SSLEngineResult.HandshakeStatus;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLSocket;
+import javax.security.auth.x500.X500Principal;
 
 /**
  * SSL/(D)TLS transportation context.
@@ -64,6 +67,13 @@ final class TransportContext implements ConnectionContext {
     Exception                       closeReason = null;
     Exception                       delegatedThrown = null;
 
+    // The reserved server certificate in previous handshaking.
+    //
+    // The server certificate is reserved in client side only if the previous
+    // handshake is a session-resumption abbreviated initial handshake for
+    // TLS 1.2 and prior versions.
+    X509Certificate                 reservedServerCert = null;
+
     // For TLS 1.3 full handshake, the last handshake flight could be wrapped
     // and encrypted in one record and delegated task would be used.  There is
     // no chance to return FINISHED handshake status with SSLEngine.(un)wrap().
@@ -80,11 +90,11 @@ final class TransportContext implements ConnectionContext {
     boolean                         needHandshakeFinishedStatus = false;
     boolean                         hasDelegatedFinished = false;
 
-
     // negotiated security parameters
     SSLSessionImpl                  conSession;
     ProtocolVersion                 protocolVersion;
     String                          applicationProtocol= null;
+    SecretKey                       resumptionMasterSecret;
 
     // handshake context
     HandshakeContext                handshakeContext = null;
@@ -97,8 +107,8 @@ final class TransportContext implements ConnectionContext {
     // connection sensitive configuration
     List<NamedGroup>                serverRequestedNamedGroups;
 
-    CipherSuite cipherSuite;
-    private static final byte[] emptyByteArray = new byte[0];
+    CipherSuite                     cipherSuite;
+    private static final byte[]     emptyByteArray = new byte[0];
 
     // Please never use the transport parameter other than storing a
     // reference to this object.
@@ -129,7 +139,7 @@ final class TransportContext implements ConnectionContext {
     TransportContext(SSLContextImpl sslContext, SSLTransport transport,
             SSLConfiguration sslConfig,
             InputRecord inputRecord, OutputRecord outputRecord) {
-        this(sslContext, transport, (SSLConfiguration)sslConfig.clone(),
+        this(sslContext, transport, sslConfig,
                 inputRecord, outputRecord, false);
     }
 
@@ -147,7 +157,8 @@ final class TransportContext implements ConnectionContext {
         this.isUnsureMode = isUnsureMode;
 
         // initial security parameters
-        this.conSession = new SSLSessionImpl();
+        this.conSession =
+                SSLSessionImpl.initialSessionFor(sslContext, sslConfig);
         this.protocolVersion = this.sslConfig.maximumProtocolVersion;
         this.clientVerifyData = emptyByteArray;
         this.serverVerifyData = emptyByteArray;
@@ -170,33 +181,55 @@ final class TransportContext implements ConnectionContext {
 
         switch (ct) {
             case HANDSHAKE:
-                byte type = HandshakeContext.getHandshakeType(this,
-                        plaintext);
+                byte type = getHandshakeType(this, plaintext);
                 if (handshakeContext == null) {
-                    if (type == SSLHandshake.KEY_UPDATE.id ||
-                            type == SSLHandshake.NEW_SESSION_TICKET.id) {
-                        if (!isNegotiated) {
-                            throw fatal(Alert.UNEXPECTED_MESSAGE,
-                                    "Unexpected unnegotiated post-handshake" +
-                                            " message: " +
-                                            SSLHandshake.nameOf(type));
-                        }
+                    if (!SSLHandshake.isConsumable(type)) {
+                        throw fatal(Alert.UNEXPECTED_MESSAGE,
+                                "Unexpected handshake message: " +
+                                SSLHandshake.nameOf(type));
+                    }
 
-                        if (!PostHandshakeContext.isConsumable(this, type)) {
+                    if ((type == SSLHandshake.KEY_UPDATE.id) ||
+                            (type == SSLHandshake.NEW_SESSION_TICKET.id)) {
+                        if (!isNegotiated  ||
+                                !protocolVersion.useTLS13PlusSpec()) {
                             throw fatal(Alert.UNEXPECTED_MESSAGE,
                                     "Unexpected post-handshake message: " +
                                     SSLHandshake.nameOf(type));
                         }
 
-                        handshakeContext = new PostHandshakeContext(this);
-                    } else {
-                        handshakeContext = sslConfig.isClientMode ?
-                                new ClientHandshakeContext(sslContext, this) :
+                        this.dispatch(type, plaintext.fragment);
+                    } else if (type == SSLHandshake.HELLO_REQUEST.id) {
+                        if (!sslConfig.isClientMode) {
+                            throw fatal(Alert.UNEXPECTED_MESSAGE,
+                                    "Unexpected handshake message received " +
+                                    "in server side: " +
+                                    SSLHandshake.HELLO_REQUEST.name);
+                        }
+                        handshakeContext =
+                                new ClientHandshakeContext(sslContext, this);
+                        outputRecord.initHandshaker();
+                        handshakeContext.dispatch(type, plaintext);
+                    } else if (type == SSLHandshake.CLIENT_HELLO.id) {
+                        if (sslConfig.isClientMode) {
+                            throw fatal(Alert.UNEXPECTED_MESSAGE,
+                                    "Unexpected handshake message received " +
+                                    "in client side: " +
+                                    SSLHandshake.CLIENT_HELLO.name);
+                        }
+                        handshakeContext =
                                 new ServerHandshakeContext(sslContext, this);
                         outputRecord.initHandshaker();
+                        handshakeContext.dispatch(type, plaintext);
+                    } else {
+                        throw fatal(Alert.UNEXPECTED_MESSAGE,
+                                "Unexpected handshake message received " +
+                                "before the handshake started: " +
+                                SSLHandshake.nameOf(type));
                     }
+                } else {
+                    handshakeContext.dispatch(type, plaintext);
                 }
-                handshakeContext.dispatch(type, plaintext);
                 break;
             case ALERT:
                 Alert.alertConsumer.consume(this, plaintext.fragment);
@@ -212,6 +245,64 @@ final class TransportContext implements ConnectionContext {
         }
     }
 
+    private void dispatch(byte handshakeType,
+              ByteBuffer fragment) throws IOException {
+        SSLConsumer consumer;
+        if (handshakeType == SSLHandshake.KEY_UPDATE.id) {
+            consumer = SSLHandshake.KEY_UPDATE;
+        } else if (handshakeType == SSLHandshake.NEW_SESSION_TICKET.id) {
+            consumer = SSLHandshake.NEW_SESSION_TICKET;
+        } else {
+            throw fatal(Alert.UNEXPECTED_MESSAGE,
+                    "Unexpected post-handshake message: " +
+                    SSLHandshake.nameOf(handshakeType));
+        }
+
+        try {
+            consumer.consume(this, fragment);
+        } catch (UnsupportedOperationException unsoe) {
+            throw fatal(Alert.UNEXPECTED_MESSAGE,
+                    "Unsupported post-handshake message: " +
+                    SSLHandshake.nameOf(handshakeType), unsoe);
+        } catch (BufferUnderflowException | BufferOverflowException be) {
+            throw fatal(Alert.DECODE_ERROR,
+                    "Illegal handshake message: " +
+                    SSLHandshake.nameOf(handshakeType), be);
+        }
+    }
+
+    /**
+     * Parse the handshake record and return the contentType
+     */
+    private static byte getHandshakeType(TransportContext conContext,
+             Plaintext plaintext) throws IOException {
+        //     struct {
+        //         HandshakeType msg_type;    /* handshake type */
+        //         uint24 length;             /* bytes in message */
+        //         select (HandshakeType) {
+        //             ...
+        //         } body;
+        //     } Handshake;
+        if (plaintext.contentType != ContentType.HANDSHAKE.id) {
+            throw conContext.fatal(Alert.INTERNAL_ERROR,
+                    "Unexpected operation for record: " + plaintext.contentType);
+        }
+
+        if (plaintext.fragment == null || plaintext.fragment.remaining() < 4) {
+            throw conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                    "Invalid handshake message: insufficient data");
+        }
+
+        byte handshakeType = (byte)Record.getInt8(plaintext.fragment);
+        int handshakeLen = Record.getInt24(plaintext.fragment);
+        if (handshakeLen != plaintext.fragment.remaining()) {
+            throw conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                    "Invalid handshake message: insufficient handshake body");
+        }
+
+        return handshakeType;
+    }
+
     void kickstart() throws IOException {
         if (isUnsureMode) {
             throw new IllegalStateException("Client/Server mode not yet set.");
@@ -220,45 +311,42 @@ final class TransportContext implements ConnectionContext {
         if (outputRecord.isClosed() || inputRecord.isClosed() || isBroken) {
             if (closeReason != null) {
                 throw new SSLException(
-                        "Cannot kickstart, the connection is broken or closed",
-                        closeReason);
+                    "Cannot kick start, the connection is broken or closed",
+                    closeReason);
             } else {
                 throw new SSLException(
-                        "Cannot kickstart, the connection is broken or closed");
+                    "Cannot kick start, the connection is broken or closed");
             }
         }
 
-        // initialize the handshaker if necessary
+        // initialize the handshake if necessary
         if (handshakeContext == null) {
             //  TLS1.3 post-handshake
             if (isNegotiated && protocolVersion.useTLS13PlusSpec()) {
-                handshakeContext = new PostHandshakeContext(this);
+                // Post-handshake message is used for the cryptographic
+                // parameters renewal within the current connection.
+                SSLHandshake.kickstart(this);
+//            } else if (isNegotiated || sslConfig.isClientMode) {
+                // Need no kickstart message on server side unless the
+                // connection has been established.
             } else {
                 handshakeContext = sslConfig.isClientMode ?
                         new ClientHandshakeContext(sslContext, this) :
                         new ServerHandshakeContext(sslContext, this);
                 outputRecord.initHandshaker();
+                handshakeContext.kickstart();
             }
-        }
-
-        // kickstart the handshake if needed
-        //
-        // Need no kickstart message on server side unless the connection
-        // has been established.
-        if(isNegotiated || sslConfig.isClientMode) {
-           handshakeContext.kickstart();
+        } else if(isNegotiated || sslConfig.isClientMode) {
+            // Need no kickstart message on server side unless the connection
+            // has been established.
+            handshakeContext.kickstart();
         }
     }
 
-    boolean isPostHandshakeContext() {
-        return handshakeContext != null &&
-                (handshakeContext instanceof PostHandshakeContext);
-    }
-
-    // Note: Don't use this method for close_nofity, use closeNotify() instead.
+    // Note: Don't use this method for close_notify, use closeNotify() instead.
     void warning(Alert alert) {
         // For initial handshaking, don't send a warning alert message to peer
-        // if handshaker has not started.
+        // if handshake has not started.
         if (isNegotiated || handshakeContext != null) {
             try {
                 outputRecord.encodeAlert(Alert.Level.WARNING.level, alert.id);
@@ -381,6 +469,7 @@ final class TransportContext implements ConnectionContext {
         }
 
         // invalidate the session
+/*
         if (conSession != null) {
             conSession.invalidate();
         }
@@ -389,7 +478,7 @@ final class TransportContext implements ConnectionContext {
                 handshakeContext.handshakeSession != null) {
             handshakeContext.handshakeSession.invalidate();
         }
-
+*/
         // send fatal alert
         //
         // If we haven't even started handshaking yet, or we are the recipient
@@ -472,6 +561,8 @@ final class TransportContext implements ConnectionContext {
             }
 
             sslConfig.toggleClientMode();
+            this.conSession =
+                    SSLSessionImpl.initialSessionFor(sslContext, sslConfig);
         }
 
         isUnsureMode = false;
@@ -609,6 +700,9 @@ final class TransportContext implements ConnectionContext {
         } else if (needHandshakeFinishedStatus) {
             // Special case to get FINISHED status for TLS 1.3 full handshake.
             return HandshakeStatus.NEED_WRAP;
+        } else if (!isNegotiated && !isBroken && !sslConfig.isClientMode) {
+            // waiting for handshake message.
+            return HandshakeStatus.NEED_UNWRAP;
         }
 
         return HandshakeStatus.NOT_HANDSHAKING;
@@ -631,6 +725,9 @@ final class TransportContext implements ConnectionContext {
         outputRecord.finishHandshake();
         isNegotiated = true;
 
+        // Set the last accessed time of the session.
+        conSession.setLastAccessedTime(System.currentTimeMillis());
+
         // Tell folk about handshake completion, but do it in a separate thread.
         if (transport instanceof SSLSocket &&
                 sslConfig.handshakeListeners != null &&
@@ -645,15 +742,6 @@ final class TransportContext implements ConnectionContext {
                 false);
             thread.start();
         }
-
-        return HandshakeStatus.FINISHED;
-    }
-
-    HandshakeStatus finishPostHandshake() {
-        handshakeContext = null;
-
-        // Note: May need trigger handshake completion even for post-handshake
-        // authentication in the future.
 
         return HandshakeStatus.FINISHED;
     }

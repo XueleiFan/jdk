@@ -121,7 +121,7 @@ final class CertStatusExtension {
             this.statusRequest = statusRequest;
         }
 
-        private CertStatusRequestSpec(HandshakeContext hc,
+        private CertStatusRequestSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             // Is it a empty extension_data?
             if (buffer.remaining() == 0) {
@@ -131,7 +131,7 @@ final class CertStatusExtension {
             }
 
             if (buffer.remaining() < 1) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid status_request extension: insufficient data"));
             }
@@ -180,10 +180,10 @@ final class CertStatusExtension {
             this.statusResponse = resp;
         }
 
-        private CertStatusResponseSpec(HandshakeContext hc,
+        private CertStatusResponseSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             if (buffer.remaining() < 2) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid status_request extension: insufficient data"));
             }
@@ -216,9 +216,9 @@ final class CertStatusExtension {
     private static final
             class CertStatusRequestStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CertStatusRequestSpec(hc, buffer)).toString();
+                return (new CertStatusRequestSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -229,9 +229,9 @@ final class CertStatusExtension {
     private static final
             class CertStatusRespStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CertStatusResponseSpec(hc, buffer)).toString();
+                return (new CertStatusResponseSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                  // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -603,7 +603,8 @@ final class CertStatusExtension {
             }
 
             // Parse the extension.
-            CertStatusRequestSpec spec = new CertStatusRequestSpec(shc, buffer);
+            CertStatusRequestSpec spec =
+                    new CertStatusRequestSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(SSLExtension.CH_STATUS_REQUEST, spec);
@@ -775,7 +776,7 @@ final class CertStatusExtension {
             this.certStatusRequests = certStatusRequests;
         }
 
-        private CertStatusRequestV2Spec(HandshakeContext hc,
+        private CertStatusRequestV2Spec(TransportContext tc,
                 ByteBuffer message) throws IOException {
             // Is it a empty extension_data?
             if (message.remaining() == 0) {
@@ -787,14 +788,14 @@ final class CertStatusExtension {
             if (message.remaining() < 5) {  //  2: certificate_status_req_list
                                             // +1: status_type
                                             // +2: request_length
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid status_request_v2 extension: insufficient data"));
             }
 
             int listLen = Record.getInt16(message);
             if (listLen <= 0) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "certificate_status_req_list length must be positive " +
                     "(received length: " + listLen + ")"));
@@ -807,7 +808,7 @@ final class CertStatusExtension {
                 int requestLen = Record.getInt16(message);
 
                 if (message.remaining() < requestLen) {
-                        throw hc.conContext.fatal(
+                        throw tc.fatal(
                                 Alert.DECODE_ERROR,
                                 new SSLProtocolException(
                             "Invalid status_request_v2 extension: " +
@@ -827,7 +828,7 @@ final class CertStatusExtension {
                     if (encoded.length < 4) {
                                         //  2: length of responder_id_list
                                         // +2: length of request_extensions
-                        throw hc.conContext.fatal(
+                        throw tc.fatal(
                                 Alert.DECODE_ERROR,
                                 new SSLProtocolException(
                             "Invalid status_request_v2 extension: " +
@@ -880,9 +881,9 @@ final class CertStatusExtension {
     private static final
             class CertStatusRequestsStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CertStatusRequestV2Spec(hc, buffer)).toString();
+                return (new CertStatusRequestV2Spec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -963,7 +964,8 @@ final class CertStatusExtension {
             }
 
             // Parse the extension.
-            CertStatusRequestV2Spec spec = new CertStatusRequestV2Spec(shc, buffer);
+            CertStatusRequestV2Spec spec =
+                    new CertStatusRequestV2Spec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(SSLExtension.CH_STATUS_REQUEST_V2,
@@ -1186,7 +1188,8 @@ final class CertStatusExtension {
             ClientHandshakeContext chc = (ClientHandshakeContext)context;
 
             // Parse the extension.
-            CertStatusResponseSpec spec = new CertStatusResponseSpec(chc, buffer);
+            CertStatusResponseSpec spec =
+                    new CertStatusResponseSpec(chc.conContext, buffer);
 
             if (chc.sslContext.isStaplingEnabled(true)) {
                 // Activate stapling
@@ -1203,7 +1206,8 @@ final class CertStatusExtension {
                 List<byte[]> respList = new ArrayList<>(
                         chc.handshakeSession.getStatusResponses());
                 respList.add(spec.statusResponse.encodedResponse);
-                chc.handshakeSession.setStatusResponses(respList);
+                ((SSLSessionImpl.ClientSession)
+                        chc.handshakeSession).setStatusResponses(respList);
             } else {
                 if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake,verbose")) {
                     SSLLogger.finest(

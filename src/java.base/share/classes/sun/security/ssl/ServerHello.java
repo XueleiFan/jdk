@@ -27,9 +27,10 @@ package sun.security.ssl;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.AlgorithmConstraints;
 import java.security.CryptoPrimitive;
 import java.security.GeneralSecurityException;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.text.MessageFormat;
 import java.util.Arrays;
 import java.util.EnumSet;
@@ -40,13 +41,16 @@ import java.util.Map;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
 import javax.net.ssl.SSLException;
-import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLProtocolException;
+
 import sun.security.ssl.CipherSuite.KeyExchange;
 import sun.security.ssl.ClientHello.ClientHelloMessage;
 import sun.security.ssl.SSLCipher.SSLReadCipher;
 import sun.security.ssl.SSLCipher.SSLWriteCipher;
 import sun.security.ssl.SSLHandshake.HandshakeMessage;
+import sun.security.ssl.SSLSessionImpl.ClientSession;
+import sun.security.ssl.SSLSessionImpl.ServerSession;
 import sun.security.ssl.SupportedVersionsExtension.SHSupportedVersionsSpec;
 
 /**
@@ -86,7 +90,11 @@ final class ServerHello {
     static final class ServerHelloMessage extends HandshakeMessage {
         final ProtocolVersion           serverVersion;      // TLS 1.3 legacy
         final RandomCookie              serverRandom;
-        final SessionId                 sessionId;          // TLS 1.3 legacy
+
+        // The sessionId field could be reset by the handshake producer,
+        // otherwise, it could be final.
+        SessionId                       sessionId;          // TLS 1.3 legacy
+
         final CipherSuite               cipherSuite;
         final byte                      compressionMethod;  // TLS 1.3 legacy
         final SSLExtensions             extensions;
@@ -100,11 +108,11 @@ final class ServerHello {
         // field for other purpose unless it is really necessary.
         final ByteBuffer                handshakeRecord;
 
-        ServerHelloMessage(HandshakeContext context,
+        ServerHelloMessage(HandshakeContext hc,
                 ProtocolVersion serverVersion, SessionId sessionId,
                 CipherSuite cipherSuite, RandomCookie serverRandom,
                 ClientHelloMessage clientHello) {
-            super(context);
+            super(hc.conContext);
 
             this.serverVersion = serverVersion;
             this.serverRandom = serverRandom;
@@ -124,7 +132,7 @@ final class ServerHello {
 
         ServerHelloMessage(HandshakeContext context,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(context.conContext);
 
             // Reserve for HelloRetryRequest consumer if needed.
             this.handshakeRecord = m.duplicate();
@@ -144,21 +152,21 @@ final class ServerHello {
             try {
                 sessionId.checkLength(serverVersion.id);
             } catch (SSLProtocolException ex) {
-                throw handshakeContext.conContext.fatal(
+                throw transportContext.fatal(
                         Alert.ILLEGAL_PARAMETER, ex);
             }
 
             int cipherSuiteId = Record.getInt16(m);
             this.cipherSuite = CipherSuite.valueOf(cipherSuiteId);
             if (cipherSuite == null || !context.isNegotiable(cipherSuite)) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw transportContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Server selected improper ciphersuite " +
                     CipherSuite.nameOf(cipherSuiteId));
             }
 
             this.compressionMethod = m.get();
             if (compressionMethod != 0) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw transportContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "compression type not supported, " + compressionMethod);
             }
 
@@ -268,6 +276,7 @@ final class ServerHello {
             // If client hasn't specified a session we can resume, start a
             // new one and choose its cipher suite and compression options,
             // unless new session creation is disabled for this connection!
+            SessionId sessionId;
             if (!shc.isResumption || shc.resumingSession == null) {
                 if (!shc.sslConfig.enableSessionCreation) {
                     throw new SSLException(
@@ -281,9 +290,7 @@ final class ServerHello {
                                 shc.algorithmConstraints, shc.activeProtocols);
                 }
 
-                SSLSessionImpl session =
-                        new SSLSessionImpl(shc, CipherSuite.C_NULL);
-                session.setMaximumPacketSize(shc.sslConfig.maximumPacketSize);
+                SSLSessionImpl session = ServerSession.createSession(shc);
                 shc.handshakeSession = session;
 
                 // consider the handshake extension impact
@@ -295,10 +302,6 @@ final class ServerHello {
                 // negotiate the cipher suite.
                 KeyExchangeProperties credentials =
                         chooseCipherSuite(shc, clientHello);
-                if (credentials == null) {
-                    throw shc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
-                            "no cipher suites in common");
-                }
                 shc.negotiatedCipherSuite = credentials.cipherSuite;
                 shc.handshakeKeyExchange = credentials.keyExchange;
                 shc.handshakeSession.setSuite(credentials.cipherSuite);
@@ -337,18 +340,24 @@ final class ServerHello {
                         }
                     }
                 }
+
+                sessionId = shc.handshakeSession.sessionId;
                 shc.handshakeProducers.put(SSLHandshake.SERVER_HELLO_DONE.id,
                         SSLHandshake.SERVER_HELLO_DONE);
             } else {
-                // stateless and use the client session id (RFC 5077 3.4)
-                if (shc.statelessResumption) {
-                    shc.resumingSession = new SSLSessionImpl(shc.resumingSession,
-                            (clientHello.sessionId.length() == 0) ?
-                                    new SessionId(true,
-                                            shc.sslContext.getSecureRandom()) :
-                                    new SessionId(clientHello.sessionId.getId())
-                    );
+                // When presenting a ticket, the client MAY generate and
+                // include s Session ID in the TLS ClientHello.  If the server
+                // accepts the ticket and the Session ID is not empty, then
+                // it MUST respond with the same Session ID present in the
+                // ClientHello. [RFC 5077 3.4]
+                if (shc.handshakeExtensions.containsKey(
+                        SSLExtension.CH_SESSION_TICKET) &&
+                        (!clientHello.sessionId.isEmpty())) {
+                    sessionId = clientHello.sessionId;
+                } else {
+                    sessionId = shc.resumingSession.sessionId;
                 }
+
                 shc.handshakeSession = shc.resumingSession;
                 shc.negotiatedProtocol =
                         shc.resumingSession.getProtocolVersion();
@@ -360,7 +369,7 @@ final class ServerHello {
             // Generate the ServerHello handshake message.
             ServerHelloMessage shm = new ServerHelloMessage(shc,
                     shc.negotiatedProtocol,
-                    shc.handshakeSession.getSessionId(),
+                    sessionId,
                     shc.negotiatedCipherSuite,
                     new RandomCookie(shc),
                     clientHello);
@@ -441,7 +450,7 @@ final class ServerHello {
                 }
 
                 SSLPossession[] hcds = ke.createPossessions(shc);
-                if ((hcds == null) || (hcds.length == 0)) {
+                if (hcds.length == 0) {
                     continue;
                 }
 
@@ -458,7 +467,7 @@ final class ServerHello {
                         cs.keyExchange,  shc.negotiatedProtocol);
                 if (ke != null) {
                     SSLPossession[] hcds = ke.createPossessions(shc);
-                    if ((hcds != null) && (hcds.length != 0)) {
+                    if (hcds.length != 0) {
                         if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                             SSLLogger.warning(
                                 "use legacy cipher suite " + cs.name);
@@ -503,9 +512,6 @@ final class ServerHello {
             ServerHandshakeContext shc = (ServerHandshakeContext)context;
             ClientHelloMessage clientHello = (ClientHelloMessage)message;
 
-            SSLSessionContextImpl sessionCache = (SSLSessionContextImpl)
-                    shc.sslContext.engineGetServerSessionContext();
-
             // If client hasn't specified a session we can resume, start a
             // new one and choose its cipher suite and compression options,
             // unless new session creation is disabled for this connection!
@@ -515,6 +521,7 @@ final class ServerHello {
                         "Not resumption, and no new session is allowed");
                 }
 
+                shc.handshakeKeyDerivation = null;  // may set by PSK.
                 if (shc.localSupportedSignAlgs == null) {
                     shc.localSupportedSignAlgs =
                         SignatureScheme.getSupportedAlgorithms(
@@ -522,9 +529,8 @@ final class ServerHello {
                                 shc.algorithmConstraints, shc.activeProtocols);
                 }
 
-                SSLSessionImpl session =
-                        new SSLSessionImpl(shc, CipherSuite.C_NULL);
-                session.setMaximumPacketSize(shc.sslConfig.maximumPacketSize);
+                SSLSessionImpl session = ServerSession.createSession(shc);
+                session.setSuite(shc.negotiatedCipherSuite);
                 shc.handshakeSession = session;
 
                 // consider the handshake extension impact
@@ -532,37 +538,18 @@ final class ServerHello {
                         shc.sslConfig.getEnabledExtensions(
                             SSLHandshake.CLIENT_HELLO, shc.negotiatedProtocol);
                 clientHello.extensions.consumeOnTrade(shc, enabledExtensions);
-
-                // negotiate the cipher suite.
-                CipherSuite cipherSuite = chooseCipherSuite(shc, clientHello);
-                if (cipherSuite == null) {
-                    throw shc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
-                            "no cipher suites in common");
-                }
-                shc.negotiatedCipherSuite = cipherSuite;
-                shc.handshakeSession.setSuite(cipherSuite);
-                shc.handshakeHash.determine(
-                        shc.negotiatedProtocol, shc.negotiatedCipherSuite);
             } else {
                 shc.handshakeSession = shc.resumingSession;
 
                 // consider the handshake extension impact
                 SSLExtension[] enabledExtensions =
                 shc.sslConfig.getEnabledExtensions(
-                SSLHandshake.CLIENT_HELLO, shc.negotiatedProtocol);
+                        SSLHandshake.CLIENT_HELLO, shc.negotiatedProtocol);
                 clientHello.extensions.consumeOnTrade(shc, enabledExtensions);
 
                 shc.negotiatedProtocol =
                         shc.resumingSession.getProtocolVersion();
                 shc.negotiatedCipherSuite = shc.resumingSession.getSuite();
-                shc.handshakeHash.determine(
-                        shc.negotiatedProtocol, shc.negotiatedCipherSuite);
-
-                setUpPskKD(shc,
-                        shc.resumingSession.consumePreSharedKey());
-
-                // The session can't be resumed again---remove it from cache
-                sessionCache.remove(shc.resumingSession.getSessionId());
             }
 
             // update the responders
@@ -688,66 +675,12 @@ final class ServerHello {
 
             shc.baseWriteSecret = writeSecret;
             shc.conContext.outputRecord.changeWriteCiphers(
-                    writeCipher, (clientHello.sessionId.length() != 0));
+                    writeCipher, (!clientHello.sessionId.isEmpty()));
 
             // Update the context for master key derivation.
             shc.handshakeKeyDerivation = kd;
 
-            // Check if the server supports stateless resumption
-            if (sessionCache.statelessEnabled()) {
-                shc.statelessResumption = true;
-            }
-
             // The handshake message has been delivered.
-            return null;
-        }
-
-        private static CipherSuite chooseCipherSuite(
-                ServerHandshakeContext shc,
-                ClientHelloMessage clientHello) throws IOException {
-            List<CipherSuite> preferred;
-            List<CipherSuite> proposed;
-            if (shc.sslConfig.preferLocalCipherSuites) {
-                preferred = shc.activeCipherSuites;
-                proposed = clientHello.cipherSuites;
-            } else {
-                preferred = clientHello.cipherSuites;
-                proposed = shc.activeCipherSuites;
-            }
-
-            CipherSuite legacySuite = null;
-            AlgorithmConstraints legacyConstraints =
-                    ServerHandshakeContext.legacyAlgorithmConstraints;
-            for (CipherSuite cs : preferred) {
-                if (!HandshakeContext.isNegotiable(
-                        proposed, shc.negotiatedProtocol, cs)) {
-                    continue;
-                }
-
-                if ((legacySuite == null) &&
-                        !legacyConstraints.permits(
-                                EnumSet.of(CryptoPrimitive.KEY_AGREEMENT),
-                                cs.name, null)) {
-                    legacySuite = cs;
-                    continue;
-                }
-
-                // The cipher suite has been negotiated.
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.fine("use cipher suite " + cs.name);
-                }
-                return cs;
-            }
-
-            if (legacySuite != null) {
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.warning(
-                            "use legacy cipher suite " + legacySuite.name);
-                }
-                return legacySuite;
-            }
-
-            // no cipher suites in common
             return null;
         }
     }
@@ -768,25 +701,13 @@ final class ServerHello {
             ServerHandshakeContext shc = (ServerHandshakeContext) context;
             ClientHelloMessage clientHello = (ClientHelloMessage) message;
 
-            // negotiate the cipher suite.
-            CipherSuite cipherSuite =
-                    T13ServerHelloProducer.chooseCipherSuite(shc, clientHello);
-            if (cipherSuite == null) {
-                throw shc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
-                        "no cipher suites in common for hello retry request");
-            }
-
             ServerHelloMessage hhrm = new ServerHelloMessage(shc,
                     ProtocolVersion.TLS12,      // use legacy version
                     clientHello.sessionId,      //  echo back
-                    cipherSuite,
+                    shc.negotiatedCipherSuite,
                     RandomCookie.hrrRandom,
                     clientHello
             );
-
-            shc.negotiatedCipherSuite = cipherSuite;
-            shc.handshakeHash.determine(
-                    shc.negotiatedProtocol, shc.negotiatedCipherSuite);
 
             // Produce extensions for HelloRetryRequest handshake message.
             SSLExtension[] serverHelloExtensions =
@@ -919,7 +840,8 @@ final class ServerHello {
                 serverVersion = helloRetryRequest.serverVersion;
             }
 
-            if (!chc.activeProtocols.contains(serverVersion)) {
+            if (serverVersion == null ||
+                    !chc.activeProtocols.contains(serverVersion)) {
                 throw chc.conContext.fatal(Alert.PROTOCOL_VERSION,
                     "The server selected protocol version " + serverVersion +
                     " is not accepted by client preferences " +
@@ -971,7 +893,8 @@ final class ServerHello {
                 serverVersion = serverHello.serverVersion;
             }
 
-            if (!chc.activeProtocols.contains(serverVersion)) {
+            if (serverVersion == null ||
+                    !chc.activeProtocols.contains(serverVersion)) {
                 throw chc.conContext.fatal(Alert.PROTOCOL_VERSION,
                     "The server selected protocol version " + serverVersion +
                     " is not accepted by client preferences " +
@@ -1082,20 +1005,13 @@ final class ServerHello {
                             "Server resumed with wrong protocol version");
                     }
 
-                    // looks fine;  resume it.
+                    // looks fine; resume it.
                     chc.isResumption = true;
-                    chc.resumingSession.setAsSessionResumption(true);
                     chc.handshakeSession = chc.resumingSession;
                 } else {
-                    // we wanted to resume, but the server refused
-                    //
-                    // Invalidate the session for initial handshake in case
-                    // of reusing next time.
-                    if (chc.resumingSession != null) {
-                        chc.resumingSession.invalidate();
-                        chc.resumingSession = null;
-                    }
+                    // The client wanted to resume, but the server refused.
                     chc.isResumption = false;
+                    chc.resumingSession = null;
                     if (!chc.sslConfig.enableSessionCreation) {
                         throw chc.conContext.fatal(Alert.PROTOCOL_VERSION,
                             "New session creation is disabled");
@@ -1108,42 +1024,45 @@ final class ServerHello {
                     SSLHandshake.SERVER_HELLO);
             serverHello.extensions.consumeOnLoad(chc, extTypes);
 
+            // Check the resumption status once again.
             if (!chc.isResumption) {
-                if (chc.resumingSession != null) {
-                    // in case the resumption happens next time.
-                    chc.resumingSession.invalidate();
-                    chc.resumingSession = null;
-                }
-
+                chc.resumingSession = null;
                 if (!chc.sslConfig.enableSessionCreation) {
                     throw chc.conContext.fatal(Alert.PROTOCOL_VERSION,
                         "New session creation is disabled");
                 }
 
-                if (serverHello.sessionId.length() == 0 &&
-                        chc.statelessResumption) {
-                    SessionId newId = new SessionId(true,
-                            chc.sslContext.getSecureRandom());
-                    chc.handshakeSession = new SSLSessionImpl(chc,
-                            chc.negotiatedCipherSuite, newId);
-
-                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                        SSLLogger.fine("Locally assigned Session Id: " +
-                                newId.toString());
-                    }
-                } else {
-                    chc.handshakeSession = new SSLSessionImpl(chc,
-                            chc.negotiatedCipherSuite,
-                            serverHello.sessionId);
-                }
-                chc.handshakeSession.setMaximumPacketSize(
-                        chc.sslConfig.maximumPacketSize);
+                chc.handshakeSession = ClientSession.createSession(chc,
+                        chc.negotiatedCipherSuite,
+                        serverHello.sessionId, chc.clientHelloId);
             }
 
             //
             // update
             //
             serverHello.extensions.consumeOnTrade(chc, extTypes);
+
+            // If unsafe server certificate change is not allowed, reserve
+            // current server certificates for session-resumption abbreviated
+            // initial handshake.
+            if (!ClientHandshakeContext.allowUnsafeServerCertChange &&
+                    chc.isResumption && !chc.conContext.isNegotiated &&
+                    chc.conContext.reservedServerCert == null) {
+                try {
+                    Certificate[] sessionCerts =
+                            chc.handshakeSession.getPeerCertificates();
+                    if (sessionCerts != null && sessionCerts.length != 0) {
+                        chc.conContext.reservedServerCert =
+                                (X509Certificate) sessionCerts[0];
+                    }
+                } catch (SSLPeerUnverifiedException puve) {
+                    // anonymous authentication
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.fine(
+                                "No peer certificate in the initial handshake");
+                    }
+                }
+            }
 
             // update the consumers and producers
             if (chc.isResumption) {
@@ -1159,7 +1078,8 @@ final class ServerHello {
                             chc, chc.resumingSession.getMasterSecret());
                 }
 
-                if (chc.statelessResumption) {
+                if (chc.handshakeExtensions.containsKey(
+                        SSLExtension.SH_SESSION_TICKET)) {
                     chc.handshakeConsumers.putIfAbsent(
                             SSLHandshake.NEW_SESSION_TICKET.id,
                             SSLHandshake.NEW_SESSION_TICKET);
@@ -1193,26 +1113,6 @@ final class ServerHello {
         }
     }
 
-    private static void setUpPskKD(HandshakeContext hc,
-            SecretKey psk) throws SSLHandshakeException {
-
-        if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-            SSLLogger.fine("Using PSK to derive early secret");
-        }
-
-        try {
-            CipherSuite.HashAlg hashAlg = hc.negotiatedCipherSuite.hashAlg;
-            HKDF hkdf = new HKDF(hashAlg.name);
-            byte[] zeros = new byte[hashAlg.hashLength];
-            SecretKey earlySecret = hkdf.extract(zeros, psk, "TlsEarlySecret");
-            hc.handshakeKeyDerivation =
-                    new SSLSecretDerivation(hc, earlySecret);
-        } catch  (GeneralSecurityException gse) {
-            throw (SSLHandshakeException) new SSLHandshakeException(
-                "Could not generate secret").initCause(gse);
-        }
-    }
-
     private static final
             class T13ServerHelloConsumer implements HandshakeConsumer {
         // Prevent instantiation of this class.
@@ -1231,6 +1131,13 @@ final class ServerHello {
                     "The ServerHello.legacy_version field is not TLS 1.2");
             }
 
+            if (!chc.initialClientHelloMsg.sessionId.equals(
+                    serverHello.sessionId)) {
+                throw chc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                        "The ServerHello.legacy_session_id_echo field does " +
+                        "not echo the ClientHello.legacy_session_id field");
+            }
+
             chc.negotiatedCipherSuite = serverHello.cipherSuite;
             chc.handshakeHash.determine(
                     chc.negotiatedProtocol, chc.negotiatedCipherSuite);
@@ -1245,33 +1152,26 @@ final class ServerHello {
                     SSLHandshake.SERVER_HELLO);
             serverHello.extensions.consumeOnLoad(chc, extTypes);
             if (!chc.isResumption) {
-                if (chc.resumingSession != null) {
-                    // in case the resumption happens next time.
-                    chc.resumingSession.invalidate();
-                    chc.resumingSession = null;
-                }
-
+                chc.resumingSession = null;
                 if (!chc.sslConfig.enableSessionCreation) {
                     throw chc.conContext.fatal(Alert.PROTOCOL_VERSION,
                         "New session creation is disabled");
                 }
-                chc.handshakeSession = new SSLSessionImpl(chc,
+
+                chc.handshakeKeyDerivation = null;  // may set by PSK.
+                chc.handshakeSession = ClientSession.createSession(chc,
                         chc.negotiatedCipherSuite,
-                        serverHello.sessionId);
-                chc.handshakeSession.setMaximumPacketSize(
-                        chc.sslConfig.maximumPacketSize);
-            } else {
-                // The PSK is consumed to allow it to be deleted
-                SecretKey psk =
-                        chc.resumingSession.consumePreSharedKey();
-                if(psk == null) {
-                    throw chc.conContext.fatal(Alert.INTERNAL_ERROR,
-                    "No PSK available. Unable to resume.");
+                        serverHello.sessionId, chc.clientHelloId);
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Created session: ", chc.handshakeSession);
                 }
-
+            } else {
                 chc.handshakeSession = chc.resumingSession;
-
-                setUpPskKD(chc, psk);
+                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                    SSLLogger.fine(
+                            "Resuming session: ", chc.resumingSession);
+                }
             }
 
             //
@@ -1373,7 +1273,7 @@ final class ServerHello {
 
             chc.baseWriteSecret = writeSecret;
             chc.conContext.outputRecord.changeWriteCiphers(
-                    writeCipher, (serverHello.sessionId.length() != 0));
+                    writeCipher, (!serverHello.sessionId.isEmpty()));
 
             // Should use resumption_master_secret for TLS 1.3.
             // chc.handshakeSession.setMasterSecret(masterSecret);

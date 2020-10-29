@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -83,7 +83,7 @@ final class Utilities {
             sniList.add(sniHostName);
         }
 
-        return Collections.<SNIServerName>unmodifiableList(sniList);
+        return Collections.unmodifiableList(sniList);
     }
 
     /**
@@ -165,14 +165,25 @@ final class Utilities {
     }
 
     static String toHexString(byte b) {
-        return String.valueOf(hexDigits[(b >> 4) & 0x0F]) +
-                String.valueOf(hexDigits[b & 0x0F]);
+        return "" + hexDigits[(b >> 4) & 0x0F] +
+                    hexDigits[b & 0x0F];
     }
 
     static String byte16HexString(int id) {
         return "0x" +
                 hexDigits[(id >> 12) & 0x0F] + hexDigits[(id >> 8) & 0x0F] +
                 hexDigits[(id >> 4) & 0x0F] + hexDigits[id & 0x0F];
+    }
+
+    static String byte16HexString(short sv) {
+        return "0x" +
+                hexDigits[(sv >> 12) & 0x0F] + hexDigits[(sv >> 8) & 0x0F] +
+                hexDigits[(sv >> 4) & 0x0F] + hexDigits[sv & 0x0F];
+    }
+
+    static String toHexString(short sv) {
+        return "" + hexDigits[(sv >> 12) & 0x0F] + hexDigits[(sv >> 8) & 0x0F] +
+                    hexDigits[(sv >>  4) & 0x0F] + hexDigits[sv & 0x0F];
     }
 
     static String toHexString(byte[] bytes) {
@@ -231,6 +242,46 @@ final class Utilities {
             b = newarray;
         }
         return b;
+    }
+
+    static byte[] toByteArray(long lv) {
+        return new byte[] {
+                (byte)((lv >> 56) & 0xFF),
+                (byte)((lv >> 48) & 0xFF),
+                (byte)((lv >> 40) & 0xFF),
+                (byte)((lv >> 32) & 0xFF),
+                (byte)((lv >> 24) & 0xFF),
+                (byte)((lv >> 16) & 0xFF),
+                (byte)((lv >>  8) & 0xFF),
+                (byte)(lv & 0xFF)
+        };
+    }
+
+    static byte[] toByteArray(int iv) {
+        return new byte[] {
+                (byte)((iv >> 24) & 0xFF),
+                (byte)((iv >> 16) & 0xFF),
+                (byte)((iv >>  8) & 0xFF),
+                (byte)(iv & 0xFF)
+        };
+    }
+
+    static long toLong(byte[] bytes) {
+        return (long)(0xFF & bytes[0]) << 56 |
+               (long)(0xFF & bytes[1]) << 48 |
+               (long)(0xFF & bytes[2]) << 40 |
+               (long)(0xFF & bytes[3]) << 32 |
+               (long)(0xFF & bytes[4]) << 24 |
+               (long)(0xFF & bytes[5]) << 16 |
+               (long)(0xFF & bytes[6]) <<  8 |
+               (long)(0xFF & bytes[7]);
+    }
+
+    static int toInteger(byte[] bytes) {
+        return (0xFF & bytes[0]) << 24 |
+               (0xFF & bytes[1]) << 16 |
+               (0xFF & bytes[2]) <<  8 |
+               (0xFF & bytes[3]);
     }
 
     static void reverseBytes(byte[] arr) {

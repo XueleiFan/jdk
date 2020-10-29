@@ -164,7 +164,7 @@ public class TestHkdf {
         byte[] deriveData;
 
         // Get an instance of the HKDF derivation engine
-        kdfHkdf = new HKDF(testData.algName);
+        kdfHkdf = HKDF.of(testData.algName);
 
         // Set up the input keying material and the salt as a secret
         SecretKey ikmKey = new SecretKeySpec(testData.IKM, "HKDF-IKM");

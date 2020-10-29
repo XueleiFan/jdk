@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -48,12 +48,11 @@ final class HelloVerifyRequest {
         final int                   serverVersion;
         final byte[]                cookie;
 
-        HelloVerifyRequestMessage(HandshakeContext context,
+        HelloVerifyRequestMessage(HandshakeContext hc,
                 HandshakeMessage message) throws IOException {
-            super(context);
+            super(hc.conContext);
             // This happens in server side only.
-            ServerHandshakeContext shc =
-                    (ServerHandshakeContext)context;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
             ClientHelloMessage clientHello = (ClientHelloMessage)message;
 
             HelloCookieManager hcMgr =
@@ -62,11 +61,11 @@ final class HelloVerifyRequest {
             this.cookie = hcMgr.createCookie(shc, clientHello);
         }
 
-        HelloVerifyRequestMessage(HandshakeContext context,
+        HelloVerifyRequestMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(hc.conContext);
             // This happens in client side only.
-            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
 
             //  struct {
             //      ProtocolVersion server_version;

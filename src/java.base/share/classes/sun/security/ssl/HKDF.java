@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,7 +44,6 @@ import java.util.Objects;
  * derivation process.
  */
 final class HKDF {
-    private final String hmacAlg;
     private final Mac hmacObj;
     private final int hmacLen;
 
@@ -58,12 +57,27 @@ final class HKDF {
      * @throws NoSuchAlgorithmException if that message digest algorithm does
      * not have an HMAC variant supported on any available provider.
      */
-    HKDF(String hashAlg) throws NoSuchAlgorithmException {
+    private HKDF(String hashAlg) throws NoSuchAlgorithmException {
         Objects.requireNonNull(hashAlg,
                 "Must provide underlying HKDF Digest algorithm.");
-        hmacAlg = "Hmac" + hashAlg.replace("-", "");
-        hmacObj = Mac.getInstance(hmacAlg);
+        hmacObj = Mac.getInstance("Hmac" + hashAlg.replace("-", ""));
         hmacLen = hmacObj.getMacLength();
+    }
+
+    /**
+     * Create an HDKF object, specifying the underlying message digest
+     * algorithm.
+     *
+     * @param hashAlg a standard name corresponding to a supported message
+     * digest algorithm.
+     *
+     * @return an instance of HKDF.
+     *
+     * @throws NoSuchAlgorithmException if that message digest algorithm does
+     * not have an HMAC variant supported on any available provider.
+     */
+    static HKDF of(String hashAlg) throws NoSuchAlgorithmException {
+        return new HKDF(hashAlg);
     }
 
     /**

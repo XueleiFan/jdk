@@ -30,7 +30,8 @@
  * @test
  * @bug 4366807
  * @summary Need new APIs to get/set session timeout and session cache size.
- * @run main/othervm SessionCacheSizeTests
+ * @run main/othervm SessionCacheSizeTests TLS
+ * @run main/othervm SessionCacheSizeTests TLSv1.2
  */
 
 import java.io.*;
@@ -252,13 +253,12 @@ public class SessionCacheSizeTests {
         int nSessions = 0;
         Enumeration e = sessCtx.getIds();
         int cacheSize = sessCtx.getSessionCacheSize();
-        SSLSession sess;
 
         while (e.hasMoreElements()) {
-            sess = sessCtx.getSession((byte[]) e.nextElement());
+            SSLSession sess = sessCtx.getSession((byte[])e.nextElement());
             long lastAccessedTime  = sess.getLastAccessedTime();
-                System.out.println(sess + "       "
-                        +  new Date(lastAccessedTime));
+            System.out.println(sess + "       "
+                            +  new Date(lastAccessedTime));
 
             nSessions++;
         }
@@ -313,7 +313,7 @@ public class SessionCacheSizeTests {
         // test the effect of javax.net.ssl.sessionCacheSize
         System.setProperty("javax.net.ssl.sessionCacheSize", String.valueOf(0));
 
-        sslctx = SSLContext.getInstance("TLS");
+        sslctx = SSLContext.getInstance(args[0]);
         KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
         KeyStore ks = KeyStore.getInstance("JKS");
         try (FileInputStream fis = new FileInputStream(keyFilename)) {

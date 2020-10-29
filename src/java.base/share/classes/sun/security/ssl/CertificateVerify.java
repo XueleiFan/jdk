@@ -68,12 +68,12 @@ final class CertificateVerify {
         // signature bytes
         private final byte[] signature;
 
-        S30CertificateVerifyMessage(HandshakeContext context,
+        S30CertificateVerifyMessage(HandshakeContext hc,
                 X509Possession x509Possession) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             // This happens in client side only.
-            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
             byte[] temproary = null;
             String algorithm = x509Possession.popPrivateKey.getAlgorithm();
             try {
@@ -95,12 +95,12 @@ final class CertificateVerify {
             this.signature = temproary;
         }
 
-        S30CertificateVerifyMessage(HandshakeContext context,
+        S30CertificateVerifyMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             // This happens in server side only.
-            ServerHandshakeContext shc = (ServerHandshakeContext)context;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             //  digitally-signed struct {
             //    select(SignatureAlgorithm) {
@@ -324,12 +324,12 @@ final class CertificateVerify {
         // signature bytes
         private final byte[] signature;
 
-        T10CertificateVerifyMessage(HandshakeContext context,
+        T10CertificateVerifyMessage(HandshakeContext hc,
                 X509Possession x509Possession) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             // This happens in client side only.
-            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
             byte[] temproary = null;
             String algorithm = x509Possession.popPrivateKey.getAlgorithm();
             try {
@@ -350,12 +350,12 @@ final class CertificateVerify {
             this.signature = temproary;
         }
 
-        T10CertificateVerifyMessage(HandshakeContext context,
+        T10CertificateVerifyMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             // This happens in server side only.
-            ServerHandshakeContext shc = (ServerHandshakeContext)context;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             //  digitally-signed struct {
             //    select(SignatureAlgorithm) {
@@ -580,12 +580,12 @@ final class CertificateVerify {
         // signature bytes
         private final byte[] signature;
 
-        T12CertificateVerifyMessage(HandshakeContext context,
+        T12CertificateVerifyMessage(HandshakeContext hc,
                 X509Possession x509Possession) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             // This happens in client side only.
-            ClientHandshakeContext chc = (ClientHandshakeContext)context;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
             Map.Entry<SignatureScheme, Signature> schemeAndSigner =
                     SignatureScheme.getSignerOfPreferableAlgorithm(
                     chc.algorithmConstraints,
@@ -615,13 +615,12 @@ final class CertificateVerify {
             this.signature = temproary;
         }
 
-        T12CertificateVerifyMessage(HandshakeContext handshakeContext,
+        T12CertificateVerifyMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // This happens in server side only.
-            ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             // struct {
             //     SignatureAndHashAlgorithm algorithm;
@@ -892,20 +891,20 @@ final class CertificateVerify {
         // signature bytes
         private final byte[] signature;
 
-        T13CertificateVerifyMessage(HandshakeContext context,
+        T13CertificateVerifyMessage(HandshakeContext hc,
                 X509Possession x509Possession) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             Map.Entry<SignatureScheme, Signature> schemeAndSigner =
                     SignatureScheme.getSignerOfPreferableAlgorithm(
-                    context.algorithmConstraints,
-                    context.peerRequestedSignatureSchemes,
+                    hc.algorithmConstraints,
+                    hc.peerRequestedSignatureSchemes,
                     x509Possession,
-                    context.negotiatedProtocol);
+                    hc.negotiatedProtocol);
             if (schemeAndSigner == null) {
                 // Unlikely, the credentials generator should have
                 // selected the preferable signature algorithm properly.
-                throw context.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
                     "No supported CertificateVerify signature algorithm for " +
                     x509Possession.popPrivateKey.getAlgorithm() +
                     "  key");
@@ -913,9 +912,9 @@ final class CertificateVerify {
 
             this.signatureScheme = schemeAndSigner.getKey();
 
-            byte[] hashValue = context.handshakeHash.digest();
+            byte[] hashValue = hc.handshakeHash.digest();
             byte[] contentCovered;
-            if (context.sslConfig.isClientMode) {
+            if (hc.sslConfig.isClientMode) {
                 contentCovered = Arrays.copyOf(clientSignHead,
                         clientSignHead.length + hashValue.length);
                 System.arraycopy(hashValue, 0, contentCovered,
@@ -933,23 +932,23 @@ final class CertificateVerify {
                 signer.update(contentCovered);
                 temproary = signer.sign();
             } catch (SignatureException ikse) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                         "Cannot produce CertificateVerify signature", ikse);
             }
 
             this.signature = temproary;
         }
 
-        T13CertificateVerifyMessage(HandshakeContext context,
+        T13CertificateVerifyMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-             super(context);
+             super(hc.conContext);
 
             // struct {
             //     SignatureAndHashAlgorithm algorithm;
             //     opaque signature<0..2^16-1>;
             // } DigitallySigned;
             if (m.remaining() < 4) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Invalid CertificateVerify message: no sufficient data");
             }
 
@@ -957,13 +956,13 @@ final class CertificateVerify {
             int ssid = Record.getInt16(m);
             this.signatureScheme = SignatureScheme.valueOf(ssid);
             if (signatureScheme == null) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                         "Invalid signature algorithm (" + ssid +
                         ") used in CertificateVerify handshake message");
             }
 
-            if (!context.localSupportedSignAlgs.contains(signatureScheme)) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+            if (!hc.localSupportedSignAlgs.contains(signatureScheme)) {
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                         "Unsupported signature algorithm (" +
                         signatureScheme.name +
                         ") used in CertificateVerify handshake message");
@@ -971,7 +970,7 @@ final class CertificateVerify {
 
             // read and verify the signature
             X509Credentials x509Credentials = null;
-            for (SSLCredentials cd : context.handshakeCredentials) {
+            for (SSLCredentials cd : hc.handshakeCredentials) {
                 if (cd instanceof X509Credentials) {
                     x509Credentials = (X509Credentials)cd;
                     break;
@@ -980,16 +979,16 @@ final class CertificateVerify {
 
             if (x509Credentials == null ||
                     x509Credentials.popPublicKey == null) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                     "No X509 credentials negotiated for CertificateVerify");
             }
 
             // opaque signature<0..2^16-1>;
             this.signature = Record.getBytes16(m);
 
-            byte[] hashValue = context.handshakeHash.digest();
+            byte[] hashValue = hc.handshakeHash.digest();
             byte[] contentCovered;
-            if (context.sslConfig.isClientMode) {
+            if (hc.sslConfig.isClientMode) {
                 contentCovered = Arrays.copyOf(serverSignHead,
                         serverSignHead.length + hashValue.length);
                 System.arraycopy(hashValue, 0, contentCovered,
@@ -1006,17 +1005,17 @@ final class CertificateVerify {
                     signatureScheme.getVerifier(x509Credentials.popPublicKey);
                 signer.update(contentCovered);
                 if (!signer.verify(signature)) {
-                    throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                    throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                         "Invalid CertificateVerify signature");
                 }
             } catch (NoSuchAlgorithmException |
                     InvalidAlgorithmParameterException nsae) {
-                throw context.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
                         "Unsupported signature algorithm (" +
                         signatureScheme.name +
                         ") used in CertificateVerify handshake message", nsae);
             } catch (InvalidKeyException | SignatureException ikse) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                         "Cannot verify CertificateVerify signature", ikse);
             }
         }

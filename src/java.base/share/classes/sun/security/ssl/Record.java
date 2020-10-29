@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -88,6 +88,18 @@ interface Record {
                ((m.get() & 0xFF) << 16) |
                ((m.get() & 0xFF) <<  8) |
                 (m.get() & 0xFF);
+    }
+
+    static long getInt64(ByteBuffer m) throws IOException {
+        verifyLength(m, 8);
+        return ((m.get() & 0xFF) << 56) |
+               ((m.get() & 0xFF) << 48) |
+               ((m.get() & 0xFF) << 40) |
+               ((m.get() & 0xFF) << 32) |
+               ((m.get() & 0xFF) << 24) |
+               ((m.get() & 0xFF) << 16) |
+               ((m.get() & 0xFF) <<  8) |
+               (m.get() & 0xFF);
     }
 
     /*

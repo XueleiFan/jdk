@@ -21,14 +21,16 @@
  * questions.
  */
 
+//
+// SunJSSE does not support dynamic system properties, no way to re-use
+// system properties in samevm/agentvm mode.
+//
+
 /*
  * @test
  * @bug 6697270
  * @summary Inputstream dosent behave correct
  * @run main/othervm ReadZeroBytes
- *
- *     SunJSSE does not support dynamic system properties, no way to re-use
- *     system properties in samevm/agentvm mode.
  */
 
 import java.io.*;
@@ -90,9 +92,6 @@ public class ReadZeroBytes {
 
         // no read, no write.
         SSLSession sess = sslSocket.getSession();
-        if (!sess.isValid()) {
-            throw new Exception("Error occurs during the initial handshake");
-        }
 
         sslIS.close();
         sslOS.close();
@@ -127,11 +126,10 @@ public class ReadZeroBytes {
         sslIS.read(new byte[1], 0, 0);
         sslOS.write(new byte[1], 0, 0);
 
-        // note that the above read/write should not kickoff handshaking.
+        // Note that the above read/write should not kickoff handshaking.
+        // Make sure the session is negotiated.
         SSLSession sess = sslSocket.getSession();
-        if (!sess.isValid()) {
-            throw new Exception("Error occurs during the initial handshake");
-        }
+        sess.getPeerCertificates();
 
         sslIS.close();
         sslOS.close();

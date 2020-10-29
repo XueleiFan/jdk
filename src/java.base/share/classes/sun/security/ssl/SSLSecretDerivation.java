@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +33,13 @@ import javax.crypto.SecretKey;
 import javax.net.ssl.SSLHandshakeException;
 import sun.security.ssl.CipherSuite.HashAlg;
 
+/**
+ * Implementation of the TLS 1.3 secret derivation, which is defined in
+ * RFC 8446 as:
+ *      Derive-Secret(Secret, Label, Messages) =
+ *          HKDF-Expand-Label(Secret, Label,
+ *                            Transcript-Hash(Messages), Hash.length)
+ */
 final class SSLSecretDerivation implements SSLKeyDerivation {
     private static final byte[] sha256EmptyDigest = new byte[] {
         (byte)0xE3, (byte)0xB0, (byte)0xC4, (byte)0x42,
@@ -60,21 +67,22 @@ final class SSLSecretDerivation implements SSLKeyDerivation {
         (byte)0x48, (byte)0x98, (byte)0xB9, (byte)0x5B
     };
 
-    private final HandshakeContext context;
-    private final String hkdfAlg;
     private final HashAlg hashAlg;
     private final SecretKey secret;
     private final byte[] transcriptHash;  // handshake messages transcript hash
 
     SSLSecretDerivation(
             HandshakeContext context, SecretKey secret) {
-        this.context = context;
         this.secret = secret;
         this.hashAlg = context.negotiatedCipherSuite.hashAlg;
-        this.hkdfAlg =
-                "HKDF-Expand/Hmac" + hashAlg.name.replace("-", "");
-        context.handshakeHash.update();
-        this.transcriptHash = context.handshakeHash.digest();
+        // Not need the handshake message digest for now, unless the early data
+        // is supported in the future.
+        if (!"TlsEarlySecret".equals(secret.getAlgorithm())) {
+            context.handshakeHash.update();
+            this.transcriptHash = context.handshakeHash.digest();
+        } else {
+            this.transcriptHash = new byte[0];
+        }
     }
 
     SSLSecretDerivation forContext(HandshakeContext context) {
@@ -96,37 +104,22 @@ final class SSLSecretDerivation implements SSLKeyDerivation {
                     // unlikely, but please update if more hash algorithm
                     // get supported in the future.
                     throw new SSLHandshakeException(
-                            "Unexpected unsupported hash algorithm: " +
-                            algorithm);
+                            "Unsupported hash algorithm: " + hashAlg);
                 }
+            } else if (ks == SecretSchedule.TlsExtBinderKey ||
+                       ks == SecretSchedule.TlsResBinderKey) {
+                expandContext = new byte[0];
             } else {
                 expandContext = transcriptHash;
             }
-            byte[] hkdfInfo = createHkdfInfo(ks.label,
+            byte[] hkdfInfo = SSLKeyDerivation.createHkdfInfo(ks.label,
                     expandContext, hashAlg.hashLength);
 
-            HKDF hkdf = new HKDF(hashAlg.name);
-            return hkdf.expand(secret, hkdfInfo, hashAlg.hashLength, algorithm);
+            return HKDF.of(hashAlg.name).expand(secret, hkdfInfo, hashAlg.hashLength, algorithm);
         } catch (GeneralSecurityException gse) {
             throw (SSLHandshakeException) new SSLHandshakeException(
                 "Could not generate secret").initCause(gse);
         }
-    }
-
-    public static byte[] createHkdfInfo(
-            byte[] label, byte[] context, int length) {
-        byte[] info = new byte[4 + label.length + context.length];
-        ByteBuffer m = ByteBuffer.wrap(info);
-        try {
-            Record.putInt16(m, length);
-            Record.putBytes8(m, label);
-            Record.putBytes8(m, context);
-        } catch (IOException ioe) {
-            // unlikely
-            throw new RuntimeException("Unexpected exception", ioe);
-        }
-
-        return info;
     }
 
     private enum SecretSchedule {
@@ -145,7 +138,7 @@ final class SSLSecretDerivation implements SSLKeyDerivation {
 
         private final byte[] label;
 
-        private SecretSchedule(String label) {
+        SecretSchedule(String label) {
             this.label = ("tls13 " + label).getBytes();
         }
     }

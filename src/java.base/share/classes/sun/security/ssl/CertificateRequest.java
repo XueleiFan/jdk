@@ -149,9 +149,9 @@ final class CertificateRequest {
         final byte[] types;                 // certificate types
         final List<byte[]> authorities;     // certificate authorities
 
-        T10CertificateRequestMessage(HandshakeContext handshakeContext,
+        T10CertificateRequestMessage(HandshakeContext hc,
                 X509Certificate[] trustedCerts, KeyExchange keyExchange) {
-            super(handshakeContext);
+            super(hc.conContext);
 
             this.authorities = new ArrayList<>(trustedCerts.length);
             for (X509Certificate cert : trustedCerts) {
@@ -162,23 +162,23 @@ final class CertificateRequest {
             this.types = ClientCertificateType.CERT_TYPES;
         }
 
-        T10CertificateRequestMessage(HandshakeContext handshakeContext,
+        T10CertificateRequestMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // struct {
             //     ClientCertificateType certificate_types<1..2^8-1>;
             //     DistinguishedName certificate_authorities<0..2^16-1>;
             // } CertificateRequest;
             if (m.remaining() < 4) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Incorrect CertificateRequest message: no sufficient data");
             }
             this.types = Record.getBytes8(m);
 
             int listLen = Record.getInt16(m);
             if (listLen > m.remaining()) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Incorrect CertificateRequest message:no sufficient data");
             }
 
@@ -368,7 +368,6 @@ final class CertificateRequest {
                     crm.getAuthorities(), (SSLEngine)chc.conContext.transport);
             }
 
-
             if (clientAlias == null) {
                 if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                     SSLLogger.warning("No available client authentication");
@@ -392,8 +391,8 @@ final class CertificateRequest {
                 return;
             }
 
-            chc.handshakePossessions.add(
-                    new X509Possession(clientPrivateKey, clientCerts));
+            chc.handshakePossessions.add(new X509Possession(
+                    clientPrivateKey, clientCerts, clientAlias));
             chc.handshakeProducers.put(SSLHandshake.CERTIFICATE_VERIFY.id,
                     SSLHandshake.CERTIFICATE_VERIFY);
         }
@@ -407,15 +406,15 @@ final class CertificateRequest {
         final int[] algorithmIds;           // supported signature algorithms
         final List<byte[]> authorities;     // certificate authorities
 
-        T12CertificateRequestMessage(HandshakeContext handshakeContext,
+        T12CertificateRequestMessage(HandshakeContext hc,
                 X509Certificate[] trustedCerts, KeyExchange keyExchange,
                 List<SignatureScheme> signatureSchemes) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             this.types = ClientCertificateType.CERT_TYPES;
 
             if (signatureSchemes == null || signatureSchemes.isEmpty()) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "No signature algorithms specified for " +
                         "CertificateRequest hanshake message");
             }
@@ -432,9 +431,9 @@ final class CertificateRequest {
             }
         }
 
-        T12CertificateRequestMessage(HandshakeContext handshakeContext,
+        T12CertificateRequestMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // struct {
             //     ClientCertificateType certificate_types<1..2^8-1>;
@@ -445,7 +444,7 @@ final class CertificateRequest {
 
             // certificate_authorities
             if (m.remaining() < 8) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "no sufficient data");
             }
@@ -453,14 +452,14 @@ final class CertificateRequest {
 
             // supported_signature_algorithms
             if (m.remaining() < 6) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "no sufficient data");
             }
 
             byte[] algs = Record.getBytes16(m);
             if (algs == null || algs.length == 0 || (algs.length & 0x01) != 0) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "incomplete signature algorithms");
             }
@@ -474,14 +473,14 @@ final class CertificateRequest {
 
             // certificate_authorities
             if (m.remaining() < 2) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "no sufficient data");
             }
 
             int listLen = Record.getInt16(m);
             if (listLen > m.remaining()) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                     "Invalid CertificateRequest message: no sufficient data");
             }
 
@@ -784,36 +783,35 @@ final class CertificateRequest {
         private final byte[] requestContext;
         private final SSLExtensions extensions;
 
-        T13CertificateRequestMessage(
-                HandshakeContext handshakeContext) throws IOException {
-            super(handshakeContext);
+        T13CertificateRequestMessage(HandshakeContext hc) throws IOException {
+            super(hc.conContext);
 
             this.requestContext = new byte[0];
             this.extensions = new SSLExtensions(this);
         }
 
-        T13CertificateRequestMessage(HandshakeContext handshakeContext,
+        T13CertificateRequestMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // struct {
             //      opaque certificate_request_context<0..2^8-1>;
             //      Extension extensions<2..2^16-1>;
             //  } CertificateRequest;
             if (m.remaining() < 5) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "no sufficient data");
             }
             this.requestContext = Record.getBytes8(m);
 
             if (m.remaining() < 4) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid CertificateRequest handshake message: " +
                         "no sufficient extensions data");
             }
             SSLExtension[] enabledExtensions =
-                handshakeContext.sslConfig.getEnabledExtensions(
+                hc.sslConfig.getEnabledExtensions(
                         SSLHandshake.CERTIFICATE_REQUEST);
             this.extensions = new SSLExtensions(this, m, enabledExtensions);
         }

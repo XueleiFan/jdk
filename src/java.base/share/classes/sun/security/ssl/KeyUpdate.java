@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,7 +47,8 @@ final class KeyUpdate {
 
     static final SSLConsumer handshakeConsumer =
         new KeyUpdateConsumer();
-    static final HandshakeProducer handshakeProducer =
+
+    private static final HandshakeProducer handshakeProducer =
         new KeyUpdateProducer();
 
     /**
@@ -67,18 +68,18 @@ final class KeyUpdate {
     static final class KeyUpdateMessage extends HandshakeMessage {
         private final KeyUpdateRequest status;
 
-        KeyUpdateMessage(PostHandshakeContext context,
+        KeyUpdateMessage(TransportContext tc,
                 KeyUpdateRequest status) {
-            super(context);
+            super(tc);
             this.status = status;
         }
 
-        KeyUpdateMessage(PostHandshakeContext context,
+        KeyUpdateMessage(TransportContext tc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(tc);
 
             if (m.remaining() != 1) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw tc.fatal(Alert.ILLEGAL_PARAMETER,
                         "KeyUpdate has an unexpected length of "+
                         m.remaining());
             }
@@ -86,7 +87,7 @@ final class KeyUpdate {
             byte request = m.get();
             this.status = KeyUpdateRequest.valueOf(request);
             if (status == null) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw tc.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid KeyUpdate message value: " +
                         KeyUpdateRequest.nameOf(request));
             }
@@ -131,7 +132,7 @@ final class KeyUpdate {
         final byte id;
         final String name;
 
-        private KeyUpdateRequest(byte id, String name) {
+        KeyUpdateRequest(byte id, String name) {
             this.id = id;
             this.name = name;
         }
@@ -167,9 +168,9 @@ final class KeyUpdate {
         // Produce kickstart handshake message.
         @Override
         public byte[] produce(ConnectionContext context) throws IOException {
-            PostHandshakeContext hc = (PostHandshakeContext)context;
+            TransportContext tc = (TransportContext)context;
             return handshakeProducer.produce(context,
-                    new KeyUpdateMessage(hc, KeyUpdateRequest.REQUESTED));
+                    new KeyUpdateMessage(tc, KeyUpdateRequest.REQUESTED));
         }
     }
 
@@ -186,8 +187,8 @@ final class KeyUpdate {
         public void consume(ConnectionContext context,
                 ByteBuffer message) throws IOException {
             // The consuming happens in client side only.
-            PostHandshakeContext hc = (PostHandshakeContext)context;
-            KeyUpdateMessage km = new KeyUpdateMessage(hc, message);
+            TransportContext tc = (TransportContext)context;
+            KeyUpdateMessage km = new KeyUpdateMessage(tc, message);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
                         "Consuming KeyUpdate post-handshake message", km);
@@ -195,60 +196,56 @@ final class KeyUpdate {
 
             // Update read key and IV.
             SSLTrafficKeyDerivation kdg =
-                SSLTrafficKeyDerivation.valueOf(hc.conContext.protocolVersion);
+                SSLTrafficKeyDerivation.valueOf(tc.protocolVersion);
             if (kdg == null) {
                 // unlikely
-                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw tc.fatal(Alert.INTERNAL_ERROR,
                         "Not supported key derivation: " +
-                                hc.conContext.protocolVersion);
+                                tc.protocolVersion);
             }
 
-            SSLKeyDerivation skd = kdg.createKeyDerivation(hc,
-                    hc.conContext.inputRecord.readCipher.baseSecret);
+            SSLKeyDerivation skd = kdg.createKeyDerivation(tc,
+                    tc.inputRecord.readCipher.baseSecret);
             if (skd == null) {
                 // unlikely
-                throw hc.conContext.fatal(
+                throw tc.fatal(
                         Alert.INTERNAL_ERROR, "no key derivation");
             }
 
             SecretKey nplus1 = skd.deriveKey("TlsUpdateNplus1", null);
-            SSLKeyDerivation kd = kdg.createKeyDerivation(hc, nplus1);
+            SSLKeyDerivation kd = kdg.createKeyDerivation(tc, nplus1);
             SecretKey key = kd.deriveKey("TlsKey", null);
             IvParameterSpec ivSpec = new IvParameterSpec(
                     kd.deriveKey("TlsIv", null).getEncoded());
             try {
                 SSLReadCipher rc =
-                    hc.negotiatedCipherSuite.bulkCipher.createReadCipher(
-                        Authenticator.valueOf(hc.conContext.protocolVersion),
-                        hc.conContext.protocolVersion, key, ivSpec,
-                        hc.sslContext.getSecureRandom());
+                    tc.cipherSuite.bulkCipher.createReadCipher(
+                        Authenticator.valueOf(tc.protocolVersion),
+                        tc.protocolVersion, key, ivSpec,
+                        tc.sslContext.getSecureRandom());
 
                 if (rc == null) {
-                    throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
-                        "Illegal cipher suite (" + hc.negotiatedCipherSuite +
-                        ") and protocol version (" + hc.negotiatedProtocol +
+                    throw tc.fatal(Alert.ILLEGAL_PARAMETER,
+                        "Illegal cipher suite (" + tc.cipherSuite +
+                        ") and protocol version (" + tc.protocolVersion +
                         ")");
                 }
 
                 rc.baseSecret = nplus1;
-                hc.conContext.inputRecord.changeReadCiphers(rc);
+                tc.inputRecord.changeReadCiphers(rc);
                 if (SSLLogger.isOn && SSLLogger.isOn("ssl")) {
                     SSLLogger.fine("KeyUpdate: read key updated");
                 }
             } catch (GeneralSecurityException gse) {
-                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw tc.fatal(Alert.INTERNAL_ERROR,
                         "Failure to derive read secrets", gse);
             }
 
             if (km.status == KeyUpdateRequest.REQUESTED) {
                 // Update the write key and IV.
-                handshakeProducer.produce(hc,
-                    new KeyUpdateMessage(hc, KeyUpdateRequest.NOTREQUESTED));
-                return;
+                handshakeProducer.produce(tc,
+                    new KeyUpdateMessage(tc, KeyUpdateRequest.NOTREQUESTED));
             }
-
-            // clean handshake context
-            hc.conContext.finishPostHandshake();
         }
     }
 
@@ -265,7 +262,10 @@ final class KeyUpdate {
         public byte[] produce(ConnectionContext context,
                 HandshakeMessage message) throws IOException {
             // The producing happens in server side only.
-            PostHandshakeContext hc = (PostHandshakeContext)context;
+            TransportContext tc = (TransportContext)context;
+
+            // The post-handshake message had been generated in the kickstart
+            // producer or the consumer.
             KeyUpdateMessage km = (KeyUpdateMessage)message;
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
@@ -274,43 +274,42 @@ final class KeyUpdate {
 
             // Update the write key and IV.
             SSLTrafficKeyDerivation kdg =
-                SSLTrafficKeyDerivation.valueOf(hc.conContext.protocolVersion);
+                SSLTrafficKeyDerivation.valueOf(tc.protocolVersion);
             if (kdg == null) {
                 // unlikely
-                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw tc.fatal(Alert.INTERNAL_ERROR,
                         "Not supported key derivation: " +
-                                hc.conContext.protocolVersion);
+                                tc.protocolVersion);
             }
 
-            SSLKeyDerivation skd = kdg.createKeyDerivation(hc,
-                    hc.conContext.outputRecord.writeCipher.baseSecret);
+            SSLKeyDerivation skd = kdg.createKeyDerivation(tc,
+                    tc.outputRecord.writeCipher.baseSecret);
             if (skd == null) {
                 // unlikely
-                throw hc.conContext.fatal(
-                        Alert.INTERNAL_ERROR, "no key derivation");
+                throw tc.fatal(Alert.INTERNAL_ERROR, "no key derivation");
             }
 
             SecretKey nplus1 = skd.deriveKey("TlsUpdateNplus1", null);
-            SSLKeyDerivation kd = kdg.createKeyDerivation(hc, nplus1);
+            SSLKeyDerivation kd = kdg.createKeyDerivation(tc, nplus1);
             SecretKey key = kd.deriveKey("TlsKey", null);
             IvParameterSpec ivSpec = new IvParameterSpec(
                     kd.deriveKey("TlsIv", null).getEncoded());
 
             SSLWriteCipher wc;
             try {
-                wc = hc.negotiatedCipherSuite.bulkCipher.createWriteCipher(
-                        Authenticator.valueOf(hc.conContext.protocolVersion),
-                        hc.conContext.protocolVersion, key, ivSpec,
-                        hc.sslContext.getSecureRandom());
+                wc = tc.cipherSuite.bulkCipher.createWriteCipher(
+                        Authenticator.valueOf(tc.protocolVersion),
+                        tc.protocolVersion, key, ivSpec,
+                        tc.sslContext.getSecureRandom());
             } catch (GeneralSecurityException gse) {
-                throw hc.conContext.fatal(Alert.INTERNAL_ERROR,
+                throw tc.fatal(Alert.INTERNAL_ERROR,
                         "Failure to derive write secrets", gse);
             }
 
             if (wc == null) {
-                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
-                    "Illegal cipher suite (" + hc.negotiatedCipherSuite +
-                    ") and protocol version (" + hc.negotiatedProtocol + ")");
+                throw tc.fatal(Alert.ILLEGAL_PARAMETER,
+                    "Illegal cipher suite (" + tc.cipherSuite +
+                    ") and protocol version (" + tc.protocolVersion + ")");
             }
 
             // Output the handshake message and change the write cipher.
@@ -318,13 +317,10 @@ final class KeyUpdate {
             // The KeyUpdate handshake message SHALL be delivered in the
             // changeWriteCiphers() implementation.
             wc.baseSecret = nplus1;
-            hc.conContext.outputRecord.changeWriteCiphers(wc, km.status.id);
+            tc.outputRecord.changeWriteCiphers(wc, km.status.id);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl")) {
                 SSLLogger.fine("KeyUpdate: write key updated");
             }
-
-            // clean handshake context
-            hc.conContext.finishPostHandshake();
 
             // The handshake message has been delivered.
             return null;

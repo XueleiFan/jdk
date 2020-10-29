@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -59,29 +59,29 @@ final class RSAClientKeyExchange {
         final boolean useTLS10PlusSpec;
         final byte[] encrypted;
 
-        RSAClientKeyExchangeMessage(HandshakeContext context,
+        RSAClientKeyExchangeMessage(HandshakeContext hc,
                 RSAPremasterSecret premaster,
                 PublicKey publicKey) throws GeneralSecurityException {
-            super(context);
-            this.protocolVersion = context.clientHelloVersion;
+            super(hc.conContext);
+            this.protocolVersion = hc.clientHelloVersion;
             this.encrypted = premaster.getEncoded(
-                    publicKey, context.sslContext.getSecureRandom());
+                    publicKey, hc.sslContext.getSecureRandom());
             this.useTLS10PlusSpec = ProtocolVersion.useTLS10PlusSpec(
-                    protocolVersion, context.sslContext.isDTLS());
+                    protocolVersion, hc.sslContext.isDTLS());
         }
 
-        RSAClientKeyExchangeMessage(HandshakeContext context,
+        RSAClientKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(hc.conContext);
 
             if (m.remaining() < 2) {
-                throw context.conContext.fatal(Alert.HANDSHAKE_FAILURE,
+                throw hc.conContext.fatal(Alert.HANDSHAKE_FAILURE,
                     "Invalid RSA ClientKeyExchange message: insufficient data");
             }
 
-            this.protocolVersion = context.clientHelloVersion;
+            this.protocolVersion = hc.clientHelloVersion;
             this.useTLS10PlusSpec = ProtocolVersion.useTLS10PlusSpec(
-                    protocolVersion, context.sslContext.isDTLS());
+                    protocolVersion, hc.sslContext.isDTLS());
             if (useTLS10PlusSpec) {
                 this.encrypted = Record.getBytes16(m);
             } else {    //  SSL 3.0

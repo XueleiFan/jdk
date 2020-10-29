@@ -74,11 +74,11 @@ final class RenegoInfoExtension {
                     renegotiatedConnection, renegotiatedConnection.length);
         }
 
-        private RenegotiationInfoSpec(HandshakeContext hc,
+        private RenegotiationInfoSpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
             // Parse the extension.
             if (!m.hasRemaining() || m.remaining() < 1) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid renegotiation_info extension data: " +
                     "insufficient data"));
@@ -107,9 +107,9 @@ final class RenegoInfoExtension {
     private static final
             class RenegotiationInfoStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new RenegotiationInfoSpec(hc, buffer)).toString();
+                return (new RenegotiationInfoSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -222,7 +222,8 @@ final class RenegoInfoExtension {
             }
 
             // Parse the extension.
-            RenegotiationInfoSpec spec = new RenegotiationInfoSpec(shc, buffer);
+            RenegotiationInfoSpec spec =
+                    new RenegotiationInfoSpec(shc.conContext, buffer);
             if (!shc.conContext.isNegotiated) {
                 // initial handshaking.
                 if (spec.renegotiatedConnection.length != 0) {
@@ -429,7 +430,8 @@ final class RenegoInfoExtension {
             }
 
             // Parse the extension.
-            RenegotiationInfoSpec spec = new RenegotiationInfoSpec(chc, buffer);
+            RenegotiationInfoSpec spec =
+                    new RenegotiationInfoSpec(chc.conContext, buffer);
             if (!chc.conContext.isNegotiated) {     // initial handshake
                 // If the extension is present, set the secure_renegotiation
                 // flag to TRUE.  The client MUST then verify that the

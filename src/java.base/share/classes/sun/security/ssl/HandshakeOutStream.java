@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -72,6 +72,11 @@ public class HandshakeOutStream extends ByteArrayOutputStream {
         }   // otherwise, the handshake outstream is temporarily used only.
     }
 
+    // Helper method for pre-shared key calculation.
+    void accept(HandshakeHash handshakeHash, int offset, int length) {
+        handshakeHash.deliver(buf, offset, length);
+    }
+
     //
     // overridden ByteArrayOutputStream methods
     //
@@ -106,22 +111,33 @@ public class HandshakeOutStream extends ByteArrayOutputStream {
 
     void putInt16(int i) throws IOException {
         checkOverflow(i, Record.OVERFLOW_OF_INT16);
-        super.write(i >> 8);
-        super.write(i);
+        super.write((byte)(i >> 8));
+        super.write((byte)i);
     }
 
     void putInt24(int i) throws IOException {
         checkOverflow(i, Record.OVERFLOW_OF_INT24);
-        super.write(i >> 16);
-        super.write(i >> 8);
-        super.write(i);
+        super.write((byte)(i >> 16));
+        super.write((byte)(i >>  8));
+        super.write((byte)i);
     }
 
     void putInt32(int i) throws IOException {
-        super.write(i >> 24);
-        super.write(i >> 16);
-        super.write(i >> 8);
-        super.write(i);
+        super.write((byte)(i >> 24));
+        super.write((byte)(i >> 16));
+        super.write((byte)(i >>  8));
+        super.write((byte)i);
+    }
+
+    void putInt64(long i) throws IOException {
+        super.write((byte)(i >> 56));
+        super.write((byte)(i >> 48));
+        super.write((byte)(i >> 40));
+        super.write((byte)(i >> 32));
+        super.write((byte)(i >> 24));
+        super.write((byte)(i >> 16));
+        super.write((byte)(i >>  8));
+        super.write((byte)i);
     }
 
     /*

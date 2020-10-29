@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,26 +47,26 @@ final class EncryptedExtensions {
         private final SSLExtensions extensions;
 
         EncryptedExtensionsMessage(
-                HandshakeContext handshakeContext) throws IOException {
-            super(handshakeContext);
+                HandshakeContext hc) throws IOException {
+            super(hc.conContext);
             this.extensions = new SSLExtensions(this);
         }
 
-        EncryptedExtensionsMessage(HandshakeContext handshakeContext,
+        EncryptedExtensionsMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // struct {
             //     Extension extensions<0..2^16-1>;
             // } EncryptedExtensions;
             if (m.remaining() < 2) {
-                throw handshakeContext.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Invalid EncryptedExtensions handshake message: " +
                         "no sufficient data");
             }
 
             SSLExtension[] encryptedExtensions =
-                    handshakeContext.sslConfig.getEnabledExtensions(
+                    hc.sslConfig.getEnabledExtensions(
                             SSLHandshake.ENCRYPTED_EXTENSIONS);
             this.extensions = new SSLExtensions(this, m, encryptedExtensions);
         }

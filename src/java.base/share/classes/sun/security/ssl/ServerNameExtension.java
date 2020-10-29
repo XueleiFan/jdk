@@ -93,17 +93,17 @@ final class ServerNameExtension {
                     new ArrayList<>(serverNames));
         }
 
-        private CHServerNamesSpec(HandshakeContext hc,
+        private CHServerNamesSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             if (buffer.remaining() < 2) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid server_name extension: insufficient data"));
             }
 
             int sniLen = Record.getInt16(buffer);
             if ((sniLen == 0) || sniLen != buffer.remaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid server_name extension: incomplete data"));
             }
@@ -124,7 +124,7 @@ final class ServerNameExtension {
                 byte[] encoded = Record.getBytes16(buffer);
                 if (nameType == StandardConstants.SNI_HOST_NAME) {
                     if (encoded.length == 0) {
-                        throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                        throw tc.fatal(Alert.DECODE_ERROR,
                                 new SSLProtocolException(
                             "Empty HostName in server_name extension"));
                     }
@@ -138,7 +138,7 @@ final class ServerNameExtension {
                             (new String(encoded, StandardCharsets.UTF_8)) +
                             ", value={" +
                             Utilities.toHexString(encoded) + "}");
-                        throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                        throw tc.fatal(Alert.ILLEGAL_PARAMETER,
                                 (SSLProtocolException)spe.initCause(iae));
                     }
                 } else {
@@ -149,14 +149,14 @@ final class ServerNameExtension {
                             "Illegal server name, type=(" + nameType +
                             "), value={" +
                             Utilities.toHexString(encoded) + "}");
-                        throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                        throw tc.fatal(Alert.ILLEGAL_PARAMETER,
                                 (SSLProtocolException)spe.initCause(iae));
                     }
                 }
 
                 // check for duplicated server name type
                 if (sniMap.put(serverName.getType(), serverName) != null) {
-                        throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                        throw tc.fatal(Alert.ILLEGAL_PARAMETER,
                                 new SSLProtocolException(
                             "Duplicated server name of type " +
                             serverName.getType()));
@@ -181,7 +181,7 @@ final class ServerNameExtension {
             }
         }
 
-        private static class UnknownServerName extends SNIServerName {
+        static class UnknownServerName extends SNIServerName {
             UnknownServerName(int code, byte[] encoded) {
                 super(code, encoded);
             }
@@ -190,9 +190,9 @@ final class ServerNameExtension {
 
     private static final class CHServerNamesStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CHServerNamesSpec(hc, buffer)).toString();
+                return (new CHServerNamesSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -229,6 +229,10 @@ final class ServerNameExtension {
             // Produce the extension.
             List<SNIServerName> serverNames;
             if (chc.isResumption && (chc.resumingSession != null)) {
+                // Unlikely to happen as this extension is produced before
+                // the resuming session is retrieved.  The server name
+                // indication is used as a part of the index of the session
+                // cache.
                 serverNames =
                         chc.resumingSession.getRequestedServerNames();
             } else {
@@ -298,7 +302,8 @@ final class ServerNameExtension {
             }
 
             // Parse the extension.
-            CHServerNamesSpec spec = new CHServerNamesSpec(shc, buffer);
+            CHServerNamesSpec spec =
+                    new CHServerNamesSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(CH_SERVER_NAME, spec);
@@ -344,13 +349,16 @@ final class ServerNameExtension {
                 // the requested server names.
                 if (!Objects.equals(
                         sni, shc.resumingSession.serverNameIndication)) {
-                    shc.isResumption = false;
-                    shc.resumingSession = null;
                     if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                         SSLLogger.fine(
                                 "abort session resumption, " +
-                                "different server name indication used");
+                                "different server name indication used: " +
+                                "requested (" + sni + "), resuming(" +
+                                shc.resumingSession.serverNameIndication + ")");
                     }
+
+                    shc.isResumption = false;
+                    shc.resumingSession = null;
                 }
             }
 
@@ -392,10 +400,10 @@ final class ServerNameExtension {
             // blank
         }
 
-        private SHServerNamesSpec(HandshakeContext hc,
+        private SHServerNamesSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             if (buffer.remaining() != 0) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid ServerHello server_name extension: not empty"));
             }
@@ -409,9 +417,9 @@ final class ServerNameExtension {
 
     private static final class SHServerNamesStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SHServerNamesSpec(hc, buffer)).toString();
+                return (new SHServerNamesSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();

@@ -68,11 +68,11 @@ final class ExtendedMasterSecretExtension {
             // blank
         }
 
-        private ExtendedMasterSecretSpec(HandshakeContext hc,
+        private ExtendedMasterSecretSpec(TransportContext tc,
                 ByteBuffer m) throws IOException {
             // Parse the extension.
             if (m.hasRemaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid extended_master_secret extension data: " +
                     "not empty"));
@@ -88,9 +88,9 @@ final class ExtendedMasterSecretExtension {
     private static final
             class ExtendedMasterSecretStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new ExtendedMasterSecretSpec(hc, buffer)).toString();
+                return (new ExtendedMasterSecretSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -171,7 +171,7 @@ final class ExtendedMasterSecretExtension {
 
             // Parse the extension.
             ExtendedMasterSecretSpec spec =
-                    new ExtendedMasterSecretSpec(shc, buffer);
+                    new ExtendedMasterSecretSpec(shc.conContext, buffer);
             if (shc.isResumption && shc.resumingSession != null &&
                     !shc.resumingSession.useExtendedMasterSecret) {
                 // For abbreviated handshake request, If the original
@@ -321,7 +321,7 @@ final class ExtendedMasterSecretExtension {
 
             // Parse the extension.
             ExtendedMasterSecretSpec spec =
-                    new ExtendedMasterSecretSpec(chc, buffer);
+                    new ExtendedMasterSecretSpec(chc.conContext, buffer);
             if (chc.isResumption && chc.resumingSession != null &&
                     !chc.resumingSession.useExtendedMasterSecret) {
                 throw chc.conContext.fatal(Alert.UNSUPPORTED_EXTENSION,

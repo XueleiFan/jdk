@@ -73,24 +73,24 @@ final class SupportedVersionsExtension {
             this.requestedProtocols = requestedProtocols;
         }
 
-        private CHSupportedVersionsSpec(HandshakeContext hc,
+        private CHSupportedVersionsSpec(TransportContext tc,
                 ByteBuffer m) throws IOException  {
             if (m.remaining() < 3) {        //  1: the length of the list
                                             // +2: one version at least
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_versions extension: insufficient data"));
             }
 
             byte[] vbs = Record.getBytes8(m);   // Get the version bytes.
             if (m.hasRemaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_versions extension: unknown extra data"));
             }
 
             if (vbs == null || vbs.length == 0 || (vbs.length & 0x01) != 0) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_versions extension: incomplete data"));
             }
@@ -140,9 +140,9 @@ final class SupportedVersionsExtension {
     private static final
             class CHSupportedVersionsStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new CHSupportedVersionsSpec(hc, buffer)).toString();
+                return (new CHSupportedVersionsSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -226,7 +226,7 @@ final class SupportedVersionsExtension {
 
             // Parse the extension.
             CHSupportedVersionsSpec spec =
-                    new CHSupportedVersionsSpec(shc, buffer);
+                    new CHSupportedVersionsSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(CH_SUPPORTED_VERSIONS, spec);
@@ -249,10 +249,10 @@ final class SupportedVersionsExtension {
             this.selectedVersion = selectedVersion.id;
         }
 
-        private SHSupportedVersionsSpec(HandshakeContext hc,
+        private SHSupportedVersionsSpec(TransportContext tc,
                 ByteBuffer m) throws IOException  {
             if (m.remaining() != 2) {       // 2: the selected version
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid supported_versions: insufficient data"));
             }
@@ -277,9 +277,9 @@ final class SupportedVersionsExtension {
     private static final
             class SHSupportedVersionsStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SHSupportedVersionsSpec(hc, buffer)).toString();
+                return (new SHSupportedVersionsSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -366,7 +366,7 @@ final class SupportedVersionsExtension {
 
             // Parse the extension.
             SHSupportedVersionsSpec spec =
-                    new SHSupportedVersionsSpec(chc, buffer);
+                    new SHSupportedVersionsSpec(chc.conContext, buffer);
 
             // Update the context.
             chc.handshakeExtensions.put(SH_SUPPORTED_VERSIONS, spec);
@@ -451,7 +451,7 @@ final class SupportedVersionsExtension {
 
             // Parse the extension.
             SHSupportedVersionsSpec spec =
-                    new SHSupportedVersionsSpec(chc, buffer);
+                    new SHSupportedVersionsSpec(chc.conContext, buffer);
 
             // Update the context.
             chc.handshakeExtensions.put(HRR_SUPPORTED_VERSIONS, spec);

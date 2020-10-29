@@ -48,6 +48,13 @@ class ServerHandshakeContext extends HandshakeContext {
                     LegacyAlgorithmConstraints.PROPERTY_TLS_LEGACY_ALGS,
                     new SSLAlgorithmDecomposer());
 
+    // Session ticket has been delivered/received for resumption, for TLS 1.2
+    // and prior versions.
+    //
+    // Note: This field is used to indicate if a session should be cached in
+    // server. The client side does not use this field yet.
+    boolean hasSessionTicket = false;
+
     // temporary authentication information
     SSLPossession interimAuthn;
 
@@ -55,7 +62,6 @@ class ServerHandshakeContext extends HandshakeContext {
     CertificateMessage.CertificateEntry currentCertEntry;
     private static final long DEFAULT_STATUS_RESP_DELAY = 5000L;
     final long statusRespTimeout;
-
 
     ServerHandshakeContext(SSLContextImpl sslContext,
             TransportContext conContext) throws IOException {

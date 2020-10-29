@@ -107,8 +107,11 @@ public class SSLCtxAccessToSessCtx  {
         SSLSessionContext sslctxCache = sslctx.getServerSessionContext();
         SSLSessionContext sessCache = sslSocket.getSession().
                                 getSessionContext();
-        if (sessCache != sslctxCache)
+        if (sessCache != sslctxCache) {
+System.err.println("server sessCache: " + sessCache);
+System.err.println("server contCacge: " + sslctxCache);
             throw new Exception("Test failed, session_cache != sslctx_cache");
+        }
         sslOS.write(85);
         sslOS.flush();
         sslSocket.close();
@@ -143,8 +146,11 @@ public class SSLCtxAccessToSessCtx  {
         SSLSession sess = sslSocket.getSession();
         SSLSessionContext sessCache = sess.getSessionContext();
         SSLSessionContext sslctxCache = sslctx.getClientSessionContext();
-        if (sessCache != sslctxCache)
+        if (sessCache != sslctxCache) {
+System.err.println("client sessCache: " + sessCache);
+System.err.println("client contCacge: " + sslctxCache);
             throw new Exception("Test failed, session_cache != sslctx_cache");
+        }
 
         int read = sslIS.read();
         sslSocket.close();

@@ -125,10 +125,14 @@ enum X509Authentication implements SSLAuthentication {
         final X509Certificate[]   popCerts;
         final PrivateKey          popPrivateKey;
 
+        // The private key alias, it could be empty if no private key.
+        final String              popPrivateKeyAlias;
+
         X509Possession(PrivateKey popPrivateKey,
-                X509Certificate[] popCerts) {
+                X509Certificate[] popCerts, String popPrivateKeyAlias) {
             this.popCerts = popCerts;
             this.popPrivateKey = popPrivateKey;
+            this.popPrivateKeyAlias =  popPrivateKeyAlias;
         }
 
         ECParameterSpec getECParameterSpec() {
@@ -277,7 +281,8 @@ enum X509Authentication implements SSLAuthentication {
                 return null;
             }
 
-            return new X509Possession(clientPrivateKey, clientCerts);
+            return new X509Possession(
+                    clientPrivateKey, clientCerts, clientAlias);
         }
 
         private SSLPossession createServerPossession(
@@ -368,7 +373,8 @@ enum X509Authentication implements SSLAuthentication {
                 }
             }
 
-            return new X509Possession(serverPrivateKey, serverCerts);
+            return new X509Possession(
+                    serverPrivateKey, serverCerts, serverAlias);
         }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -79,12 +79,11 @@ final class ECDHServerKeyExchange {
         private SSLCredentials sslCredentials;
 
         ECDHServerKeyExchangeMessage(
-                HandshakeContext handshakeContext) throws IOException {
-            super(handshakeContext);
+                HandshakeContext hc) throws IOException {
+            super(hc.conContext);
 
             // This happens in server side only.
-            ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+            ServerHandshakeContext shc = (ServerHandshakeContext)hc;
 
             // Find the Possessions needed
             NamedGroupPossession namedGroupPossession = null;
@@ -180,13 +179,12 @@ final class ECDHServerKeyExchange {
             }
         }
 
-        ECDHServerKeyExchangeMessage(HandshakeContext handshakeContext,
+        ECDHServerKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // This happens in client side only.
-            ClientHandshakeContext chc =
-                    (ClientHandshakeContext)handshakeContext;
+            ClientHandshakeContext chc = (ClientHandshakeContext)hc;
 
             byte curveType = (byte)Record.getInt8(m);
             if (curveType != CURVE_NAMED_CURVE) {
@@ -215,7 +213,7 @@ final class ECDHServerKeyExchange {
 
             try {
                 sslCredentials = namedGroup.decodeCredentials(
-                    publicPoint, handshakeContext.algorithmConstraints,
+                    publicPoint, hc.algorithmConstraints,
                      s -> chc.conContext.fatal(Alert.INSUFFICIENT_SECURITY,
                      "ServerKeyExchange " + namedGroup + ": " + (s)));
             } catch (GeneralSecurityException ex) {

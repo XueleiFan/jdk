@@ -39,7 +39,6 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.SSLPeerUnverifiedException;
 
 import jdk.internal.event.EventHelper;
@@ -73,36 +72,37 @@ final class Finished {
     private static final class FinishedMessage extends HandshakeMessage {
         private final byte[] verifyData;
 
-        FinishedMessage(HandshakeContext context) throws IOException {
-            super(context);
+        FinishedMessage(HandshakeContext hc) throws IOException {
+            super(hc.conContext);
 
             VerifyDataScheme vds =
-                    VerifyDataScheme.valueOf(context.negotiatedProtocol);
+                    VerifyDataScheme.valueOf(hc.negotiatedProtocol);
 
             byte[] vd = null;
             try {
-                vd = vds.createVerifyData(context, false);
+                vd = vds.createVerifyData(hc, false);
             } catch (IOException ioe) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Failed to generate verify_data", ioe);
             }
 
             this.verifyData = vd;
         }
 
-        FinishedMessage(HandshakeContext context,
+        FinishedMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(context);
+            super(hc.conContext);
+
             int verifyDataLen = 12;
-            if (context.negotiatedProtocol == ProtocolVersion.SSL30) {
+            if (hc.negotiatedProtocol == ProtocolVersion.SSL30) {
                 verifyDataLen = 36;
-            } else if (context.negotiatedProtocol.useTLS13PlusSpec()) {
+            } else if (hc.negotiatedProtocol.useTLS13PlusSpec()) {
                 verifyDataLen =
-                        context.negotiatedCipherSuite.hashAlg.hashLength;
+                        hc.negotiatedCipherSuite.hashAlg.hashLength;
             }
 
             if (m.remaining() != verifyDataLen) {
-                throw context.conContext.fatal(Alert.DECODE_ERROR,
+                throw hc.conContext.fatal(Alert.DECODE_ERROR,
                     "Inappropriate finished message: need " + verifyDataLen +
                     " but remaining " + m.remaining() + " bytes verify_data");
             }
@@ -111,16 +111,16 @@ final class Finished {
             m.get(verifyData);
 
             VerifyDataScheme vd =
-                    VerifyDataScheme.valueOf(context.negotiatedProtocol);
+                    VerifyDataScheme.valueOf(hc.negotiatedProtocol);
             byte[] myVerifyData;
             try {
-                myVerifyData = vd.createVerifyData(context, true);
+                myVerifyData = vd.createVerifyData(hc, true);
             } catch (IOException ioe) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw hc.conContext.fatal(Alert.ILLEGAL_PARAMETER,
                         "Failed to generate verify_data", ioe);
             }
             if (!MessageDigest.isEqual(myVerifyData, verifyData)) {
-                throw context.conContext.fatal(Alert.DECRYPT_ERROR,
+                throw hc.conContext.fatal(Alert.DECRYPT_ERROR,
                         "The Finished message cannot be verified.");
             }
         }
@@ -325,7 +325,7 @@ final class Finished {
         }
     }
 
-    // TLS 1.2
+    // TLS 1.3
     private static final
             class T13VerifyDataGenerator implements VerifyDataGenerator {
         private static final byte[] hkdfLabel = "tls13 finished".getBytes();
@@ -410,22 +410,23 @@ final class Finished {
                 chc.conContext.clientVerifyData = fm.verifyData;
             }
 
-            if (chc.statelessResumption) {
-                chc.handshakeConsumers.put(
-                        SSLHandshake.NEW_SESSION_TICKET.id, SSLHandshake.NEW_SESSION_TICKET);
-            }
             // update the consumers and producers
             if (!chc.isResumption) {
+                if (chc.handshakeExtensions.containsKey(
+                        SSLExtension.SH_SESSION_TICKET)) {
+                    chc.handshakeConsumers.putIfAbsent(
+                            SSLHandshake.NEW_SESSION_TICKET.id,
+                            SSLHandshake.NEW_SESSION_TICKET);
+                }
+
                 chc.conContext.consumers.put(ContentType.CHANGE_CIPHER_SPEC.id,
                         ChangeCipherSpec.t10Consumer);
                 chc.handshakeConsumers.put(
                         SSLHandshake.FINISHED.id, SSLHandshake.FINISHED);
                 chc.conContext.inputRecord.expectingFinishFlight();
             } else {
-                if (chc.handshakeSession.isRejoinable()) {
-                    ((SSLSessionContextImpl)chc.sslContext.
-                        engineGetClientSessionContext()).put(
-                            chc.handshakeSession);
+                if (chc.handshakeSession.worthyOfCache()) {
+                    chc.sslContext.clientCache.put(chc.handshakeSession);
                 }
                 chc.conContext.conSession = chc.handshakeSession.finish();
                 chc.conContext.protocolVersion = chc.negotiatedProtocol;
@@ -445,8 +446,10 @@ final class Finished {
 
         private byte[] onProduceFinished(ServerHandshakeContext shc,
                 HandshakeMessage message) throws IOException {
-            if (shc.statelessResumption) {
-                NewSessionTicket.handshake12Producer.produce(shc, message);
+            if (shc.handshakeExtensions.containsKey(
+                    SSLExtension.SH_SESSION_TICKET) &&
+                    shc.handshakeSession.isStatelessable()) {
+                NewSessionTicket.t12HandshakeProducer.produce(shc, message);
             }
 
             // Refresh handshake hash
@@ -482,15 +485,10 @@ final class Finished {
                 shc.conContext.inputRecord.expectingFinishFlight();
             } else {
                 // Set the session's context based on stateless/cache status
-                if (shc.statelessResumption &&
-                        shc.handshakeSession.isStatelessable()) {
-                    shc.handshakeSession.setContext((SSLSessionContextImpl)
-                            shc.sslContext.engineGetServerSessionContext());
-                } else {
-                    if (shc.handshakeSession.isRejoinable()) {
-                        ((SSLSessionContextImpl)shc.sslContext.
-                                engineGetServerSessionContext()).put(
-                                shc.handshakeSession);
+                if (!shc.hasSessionTicket ||
+                        !shc.handshakeSession.isStatelessable()) {
+                    if (shc.handshakeSession.worthyOfCache()) {
+                        shc.sslContext.serverCache.put(shc.handshakeSession);
                     }
                 }
                 shc.conContext.conSession = shc.handshakeSession.finish();
@@ -556,10 +554,8 @@ final class Finished {
             }
 
             if (!chc.isResumption) {
-                if (chc.handshakeSession.isRejoinable()) {
-                    ((SSLSessionContextImpl)chc.sslContext.
-                        engineGetClientSessionContext()).put(
-                            chc.handshakeSession);
+                if (chc.handshakeSession.worthyOfCache()) {
+                    chc.sslContext.clientCache.put(chc.handshakeSession);
                 }
                 chc.conContext.conSession = chc.handshakeSession.finish();
                 chc.conContext.protocolVersion = chc.negotiatedProtocol;
@@ -616,11 +612,9 @@ final class Finished {
             }
 
             if (shc.isResumption) {
-                if (shc.handshakeSession.isRejoinable() &&
-                        !shc.statelessResumption) {
-                    ((SSLSessionContextImpl)shc.sslContext.
-                        engineGetServerSessionContext()).put(
-                            shc.handshakeSession);
+                if (shc.handshakeSession.worthyOfCache() &&
+                        !shc.hasSessionTicket) {
+                    shc.sslContext.serverCache.put(shc.handshakeSession);
                 }
                 shc.conContext.conSession = shc.handshakeSession.finish();
                 shc.conContext.protocolVersion = shc.negotiatedProtocol;
@@ -754,11 +748,11 @@ final class Finished {
 
             // The resumption master secret is stored in the session so
             // it can be used after the handshake is completed.
-            SSLSecretDerivation sd = ((SSLSecretDerivation) kd).forContext(chc);
-            SecretKey resumptionMasterSecret = sd.deriveKey(
-                    "TlsResumptionMasterSecret", null);
-            chc.handshakeSession.setResumptionMasterSecret(
-                    resumptionMasterSecret);
+            if (chc.handshakeSession.worthyOfCache()) {
+                SSLSecretDerivation sd = ((SSLSecretDerivation)kd).forContext(chc);
+                chc.conContext.resumptionMasterSecret = sd.deriveKey(
+                        "TlsResumptionMasterSecret", null);
+            }
 
             chc.conContext.conSession = chc.handshakeSession.finish();
             chc.conContext.protocolVersion = chc.negotiatedProtocol;
@@ -767,7 +761,6 @@ final class Finished {
             chc.handshakeFinished = true;
             chc.conContext.finishHandshake();
             recordEvent(chc.conContext.conSession);
-
 
             // The handshake message has been delivered.
             return null;
@@ -810,13 +803,9 @@ final class Finished {
                 SecretKey saltSecret = kd.deriveKey("TlsSaltSecret", null);
 
                 // derive application secrets
-                HashAlg hashAlg = shc.negotiatedCipherSuite.hashAlg;
-                HKDF hkdf = new HKDF(hashAlg.name);
-                byte[] zeros = new byte[hashAlg.hashLength];
-                SecretKeySpec sharedSecret =
-                        new SecretKeySpec(zeros, "TlsZeroSecret");
-                SecretKey masterSecret =
-                    hkdf.extract(saltSecret, sharedSecret, "TlsMasterSecret");
+                SecretKey masterSecret = SSLPseudorandomKeyDerivation
+                        .of(shc, saltSecret, null)
+                        .deriveKey("TlsMasterSecret", null);
 
                 SSLKeyDerivation secretKD =
                         new SSLSecretDerivation(shc, masterSecret);
@@ -863,9 +852,10 @@ final class Finished {
                 shc.conContext.serverVerifyData = fm.verifyData;
             }
 
-            // Make sure session's context is set
-            shc.handshakeSession.setContext((SSLSessionContextImpl)
-                    shc.sslContext.engineGetServerSessionContext());
+            // save the session, TODO, delay to NewSessionTick?
+            if (!shc.isResumption && shc.handshakeSession.worthyOfCache()) {
+                shc.sslContext.serverCache.put(shc.handshakeSession);
+            }
             shc.conContext.conSession = shc.handshakeSession.finish();
 
             // update the context
@@ -957,10 +947,8 @@ final class Finished {
             }
 
             // save the session
-            if (!chc.isResumption && chc.handshakeSession.isRejoinable()) {
-                ((SSLSessionContextImpl)chc.sslContext.
-                        engineGetClientSessionContext()).
-                        put(chc.handshakeSession);
+            if (!chc.isResumption && chc.handshakeSession.worthyOfCache()) {
+                chc.sslContext.clientCache.put(chc.handshakeSession);
             }
 
             // derive salt secret
@@ -968,13 +956,9 @@ final class Finished {
                 SecretKey saltSecret = kd.deriveKey("TlsSaltSecret", null);
 
                 // derive application secrets
-                HashAlg hashAlg = chc.negotiatedCipherSuite.hashAlg;
-                HKDF hkdf = new HKDF(hashAlg.name);
-                byte[] zeros = new byte[hashAlg.hashLength];
-                SecretKeySpec sharedSecret =
-                        new SecretKeySpec(zeros, "TlsZeroSecret");
-                SecretKey masterSecret =
-                    hkdf.extract(saltSecret, sharedSecret, "TlsMasterSecret");
+                SecretKey masterSecret = SSLPseudorandomKeyDerivation
+                        .of(chc, saltSecret, null)
+                        .deriveKey("TlsMasterSecret", null);
 
                 SSLKeyDerivation secretKD =
                         new SSLSecretDerivation(chc, masterSecret);
@@ -1114,13 +1098,13 @@ final class Finished {
 
                 // The resumption master secret is stored in the session so
                 // it can be used after the handshake is completed.
-                shc.handshakeHash.update();
-                SSLSecretDerivation sd =
-                        ((SSLSecretDerivation)kd).forContext(shc);
-                SecretKey resumptionMasterSecret = sd.deriveKey(
-                "TlsResumptionMasterSecret", null);
-                shc.handshakeSession.setResumptionMasterSecret(
-                        resumptionMasterSecret);
+                if (shc.handshakeSession.worthyOfCache()) {
+                    shc.handshakeHash.update();
+                    SSLSecretDerivation sd =
+                            ((SSLSecretDerivation) kd).forContext(shc);
+                    shc.conContext.resumptionMasterSecret = sd.deriveKey(
+                            "TlsResumptionMasterSecret", null);
+                }
             } catch (GeneralSecurityException gse) {
                 throw shc.conContext.fatal(Alert.INTERNAL_ERROR,
                         "Failure to derive application secrets", gse);
@@ -1139,9 +1123,8 @@ final class Finished {
             }
             recordEvent(shc.conContext.conSession);
 
-            //
-            // produce
-            NewSessionTicket.t13PosthandshakeProducer.produce(shc);
+            // produce post-handshake messages
+            NewSessionTicket.t13HandshakeProducer.produce(shc.conContext);
         }
     }
 

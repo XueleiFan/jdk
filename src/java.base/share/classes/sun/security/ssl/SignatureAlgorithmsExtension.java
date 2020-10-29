@@ -82,23 +82,23 @@ final class SignatureAlgorithmsExtension {
             }
         }
 
-        SignatureSchemesSpec(HandshakeContext hc,
+        SignatureSchemesSpec(TransportContext tc,
                 ByteBuffer buffer) throws IOException {
             if (buffer.remaining() < 2) {      // 2: the length of the list
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid signature_algorithms: insufficient data"));
             }
 
             byte[] algs = Record.getBytes16(buffer);
             if (buffer.hasRemaining()) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid signature_algorithms: unknown extra data"));
             }
 
             if (algs == null || algs.length == 0 || (algs.length & 0x01) != 0) {
-                throw hc.conContext.fatal(Alert.DECODE_ERROR,
+                throw tc.fatal(Alert.DECODE_ERROR,
                         new SSLProtocolException(
                     "Invalid signature_algorithms: incomplete data"));
             }
@@ -148,9 +148,9 @@ final class SignatureAlgorithmsExtension {
     private static final
             class SignatureSchemesStringizer implements SSLStringizer {
         @Override
-        public String toString(HandshakeContext hc, ByteBuffer buffer) {
+        public String toString(TransportContext tc, ByteBuffer buffer) {
             try {
-                return (new SignatureSchemesSpec(hc, buffer)).toString();
+                return (new SignatureSchemesSpec(tc, buffer)).toString();
             } catch (IOException ioe) {
                 // For debug logging only, so please swallow exceptions.
                 return ioe.getMessage();
@@ -239,7 +239,8 @@ final class SignatureAlgorithmsExtension {
             }
 
             // Parse the extension.
-            SignatureSchemesSpec spec = new SignatureSchemesSpec(shc, buffer);
+            SignatureSchemesSpec spec =
+                    new SignatureSchemesSpec(shc.conContext, buffer);
 
             // Update the context.
             shc.handshakeExtensions.put(
@@ -460,7 +461,8 @@ final class SignatureAlgorithmsExtension {
             }
 
             // Parse the extension.
-            SignatureSchemesSpec spec = new SignatureSchemesSpec(chc, buffer);
+            SignatureSchemesSpec spec =
+                    new SignatureSchemesSpec(chc.conContext, buffer);
 
             List<SignatureScheme> knownSignatureSchemes = new LinkedList<>();
             for (int id : spec.signatureSchemes) {

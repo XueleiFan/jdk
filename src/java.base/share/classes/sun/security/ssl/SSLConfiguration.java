@@ -106,12 +106,18 @@ final class SSLConfiguration implements Cloneable {
             "jdk.tls.acknowledgeCloseNotify", false);
 
     // Set the max size limit for Handshake Message to 2^15
-    static final int maxHandshakeMessageSize = GetIntegerAction.privilegedGetProperty(
+    static final int maxHandshakeMessageSize =
+        GetIntegerAction.privilegedGetProperty(
             "jdk.tls.maxHandshakeMessageSize", 32768);
 
     // Set the max certificate chain length to 10
-    static final int maxCertificateChainLength = GetIntegerAction.privilegedGetProperty(
+    static final int maxCertificateChainLength =
+        GetIntegerAction.privilegedGetProperty(
             "jdk.tls.maxCertificateChainLength", 10);
+
+    // To switch on/off the distributed sessions.
+    static final boolean useDistributedSessions = Utilities.getBooleanProperty(
+            "jdk.tls.server.useDistributedSessions", true);
 
     // Is the extended_master_secret extension supported?
     static {
@@ -390,6 +396,68 @@ final class SSLConfiguration implements Cloneable {
 
                 for (ProtocolVersion protocolVersion : activeProtocols) {
                     if (extension.isAvailable(protocolVersion)) {
+                        extensions.add(extension);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return extensions.toArray(new SSLExtension[0]);
+    }
+
+    /**
+     * Get the enabled extensions for the specific handshake message
+     * and the specific protocol versions, from the specific extensions.
+     *
+     * Used to produce ClientHello extensions before handshake protocol
+     * version negotiation.
+     */
+    SSLExtension[] getEnabledExtensions(
+            SSLHandshake handshakeType,
+            List<ProtocolVersion> activeProtocols,
+            List<SSLExtension> included) {
+        List<SSLExtension> extensions = new ArrayList<>();
+        for (SSLExtension extension : SSLExtension.values()) {
+            if (extension.handshakeType == handshakeType) {
+                if (!isAvailable(extension)) {
+                    continue;
+                }
+
+                for (ProtocolVersion protocolVersion : activeProtocols) {
+                    if (extension.isAvailable(protocolVersion) &&
+                            included.contains(extension)) {
+                        extensions.add(extension);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return extensions.toArray(new SSLExtension[0]);
+    }
+
+    /**
+     * Get the enabled extensions for the specific handshake message
+     * and the specific protocol versions, excluding the specific extensions.
+     *
+     * Used to produce ClientHello extensions before handshake protocol
+     * version negotiation.
+     */
+    SSLExtension[] getExclusiveExtensions(
+            SSLHandshake handshakeType,
+            List<ProtocolVersion> activeProtocols,
+            List<SSLExtension> excluded) {
+        List<SSLExtension> extensions = new ArrayList<>();
+        for (SSLExtension extension : SSLExtension.values()) {
+            if (extension.handshakeType == handshakeType) {
+                if (!isAvailable(extension)) {
+                    continue;
+                }
+
+                for (ProtocolVersion protocolVersion : activeProtocols) {
+                    if (extension.isAvailable(protocolVersion) &&
+                            !excluded.contains(extension)) {
                         extensions.add(extension);
                         break;
                     }

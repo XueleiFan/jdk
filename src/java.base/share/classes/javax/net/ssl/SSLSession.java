@@ -148,9 +148,8 @@ public interface SSLSession {
 
     /**
      *
-     * Binds the specified {@code value} object into the
-     * session's application layer data
-     * with the given {@code name}.
+     * Binds the specified {@code value} object into the session's application
+     * layer data with the given {@code name}.
      * <P>
      * Any existing binding using the same {@code name} is
      * replaced.  If the new (or existing) {@code value} implements the
@@ -164,7 +163,10 @@ public interface SSLSession {
      *          This may not be null.
      * @param value the data object to be bound. This may not be null.
      * @throws IllegalArgumentException if either argument is null.
+     *
+     * @deprecated Please handle application data in application layer.
      */
+    @Deprecated(since="16")
     public void putValue(String name, Object value);
 
 
@@ -179,7 +181,10 @@ public interface SSLSession {
      * @return the value bound to that name, or null if the binding does
      *          not exist.
      * @throws IllegalArgumentException if the argument is null.
+     *
+     * @deprecated Please handle application data in application layer.
      */
+    @Deprecated(since="16")
     public Object getValue(String name);
 
 
@@ -196,7 +201,10 @@ public interface SSLSession {
      * @param name the name of the object to remove visible
      *          across different access control contexts
      * @throws IllegalArgumentException if the argument is null.
+     *
+     * @deprecated Please handle application data in application layer.
      */
+    @Deprecated(since="16")
     public void removeValue(String name);
 
 
@@ -209,8 +217,11 @@ public interface SSLSession {
      *
      * @return a non-null (possibly empty) array of names of the objects
      *  bound to this Session.
+     *
+     * @deprecated Please handle application data in application layer.
      */
-    public String [] getValueNames();
+    @Deprecated(since="16")
+    public String[] getValueNames();
 
     /**
      * Returns the identity of the peer which was established as part
@@ -230,7 +241,7 @@ public interface SSLSession {
      *          been verified
      * @see #getPeerPrincipal()
      */
-    public java.security.cert.Certificate [] getPeerCertificates()
+    public java.security.cert.Certificate[] getPeerCertificates()
             throws SSLPeerUnverifiedException;
 
     /**
@@ -253,7 +264,7 @@ public interface SSLSession {
      *
      * @see #getLocalPrincipal()
      */
-    public java.security.cert.Certificate [] getLocalCertificates();
+    public java.security.cert.Certificate[] getLocalCertificates();
 
     /**
      * Returns the identity of the peer which was identified as part

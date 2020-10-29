@@ -67,18 +67,22 @@ public class ImmutableExtendedSSLSession extends ExtendedSSLSession {
         return delegate.isValid();
     }
 
+    @SuppressWarnings("deprecation")
     public void putValue(String name, Object value) {
         throw new UnsupportedOperationException("session is not mutable");
     }
 
+    @SuppressWarnings("deprecation")
     public Object getValue(String name) {
         return delegate.getValue(name);
     }
 
+    @SuppressWarnings("deprecation")
     public void removeValue(String name) {
         throw new UnsupportedOperationException("session is not mutable");
     }
 
+    @SuppressWarnings("deprecation")
     public String [] getValueNames() {
         return delegate.getValueNames();
     }

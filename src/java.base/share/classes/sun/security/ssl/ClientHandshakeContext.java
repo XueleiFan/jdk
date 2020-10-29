@@ -78,20 +78,12 @@ class ClientHandshakeContext extends HandshakeContext {
             Utilities.getBooleanProperty(
                     "jdk.tls.allowUnsafeServerCertChange", false);
 
-    /*
-     * the reserved server certificate chain in previous handshaking
-     *
-     * The server certificate chain is only reserved if the previous
-     * handshake is a session-resumption abbreviated initial handshake.
-     */
-    X509Certificate[] reservedServerCerts = null;
-
     X509Certificate[] deferredCerts;
 
     ClientHelloMessage initialClientHelloMsg = null;
 
-    // PSK identity is selected in first Hello and used again after HRR
-    byte[] pskIdentity;
+    // The ClientHello ID used for session cache.
+    SessionId clientHelloId;
 
     ClientHandshakeContext(SSLContextImpl sslContext,
             TransportContext conContext) throws IOException {

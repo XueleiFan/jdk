@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -70,14 +70,14 @@ final class RSAServerKeyExchange {
         // signature bytes, none-null as no anonymous RSA key exchange.
         private final byte[] paramsSignature;
 
-        private RSAServerKeyExchangeMessage(HandshakeContext handshakeContext,
+        private RSAServerKeyExchangeMessage(HandshakeContext hc,
                 X509Possession x509Possession,
                 EphemeralRSAPossession rsaPossession) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // This happens in server side only.
             ServerHandshakeContext shc =
-                    (ServerHandshakeContext)handshakeContext;
+                    (ServerHandshakeContext)hc;
 
             RSAPublicKey publicKey = rsaPossession.popPublicKey;
             RSAPublicKeySpec spec = JsseJce.getRSAPublicKeySpec(publicKey);
@@ -101,13 +101,13 @@ final class RSAServerKeyExchange {
             this.paramsSignature = signature;
         }
 
-        RSAServerKeyExchangeMessage(HandshakeContext handshakeContext,
+        RSAServerKeyExchangeMessage(HandshakeContext hc,
                 ByteBuffer m) throws IOException {
-            super(handshakeContext);
+            super(hc.conContext);
 
             // This happens in client side only.
             ClientHandshakeContext chc =
-                    (ClientHandshakeContext)handshakeContext;
+                    (ClientHandshakeContext)hc;
 
             this.modulus = Record.getBytes16(m);
             this.exponent = Record.getBytes16(m);
