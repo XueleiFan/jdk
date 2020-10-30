@@ -255,7 +255,7 @@ class SSLSessionContextImpl implements SSLSessionContext {
             this.timeoutMillis = timeoutSeconds * 1000L;
             this.oldestEntry = null;
             this.newestEntry = null;
-            this.cacheMap = new ConcurrentHashMap<>(cacheLimit);
+            this.cacheMap = new ConcurrentHashMap<>();
             this.referenceQueue = new ReferenceQueue<>();
         }
 

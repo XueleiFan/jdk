@@ -136,8 +136,8 @@ final class CertificateMessage {
                 while (listLen > 0) {
                     byte[] encodedCert = Record.getBytes24(m);
                     listLen -= (3 + encodedCert.length);
-                    if (encodedCerts.size() >
-                          SSLConfiguration.maxCertificateChainLength) {
+                    encodedCerts.add(encodedCert);
+                    if (encodedCerts.size() > SSLConfiguration.maxCertificateChainLength) {
                         throw new SSLProtocolException(
                                 "The certificate chain length ("
                                 + encodedCerts.size()
@@ -449,7 +449,7 @@ final class CertificateMessage {
 
                     throw chc.conContext.fatal(Alert.BAD_CERTIFICATE,
                             "server certificate change is restricted " +
-                                    "during renegotiation");
+                            "during renegotiation");
                 }
             }
 
