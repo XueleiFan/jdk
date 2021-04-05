@@ -263,9 +263,9 @@ public class SSLSocketSSLEngineTemplate {
                         len = is.read(inbound);
                         if (len == -1) {
                             logSocketStatus(clientSocket);
-                            if (clientSocket.isClosed()
+                            if (closed || clientSocket.isClosed()
                                     || clientSocket.isOutputShutdown()) {
-                                log("Client socket was closed or shutdown output");
+                                log("Client socket was closed or is closing");
                                 break;
                             } else {
                                 throw new Exception("Unexpected EOF");
