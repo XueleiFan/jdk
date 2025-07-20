@@ -1,0 +1,30 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Runs every Sunday at midnight UTC
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync with upstream
+        uses: repo-sync/pull-request@v2
+        with:
+          source_branch: "" # Sync all branches
+          destination_branch: "" # To the same branches in your fork
+          upstream_repository: "https://github.com/openjdk/jdk"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_title: "Sync with upstream"
+          pr_body: "This PR syncs the latest changes from the upstream repository."
+          pr_assignee: "${{ github.actor }}"
+          pr_reviewer: "${{ github.actor }}"
+
+      - name: Notify on failure
+        if: ${{ failure() }}
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_MESSAGE: "Upstream sync failed with merge conflicts. Please resolve them manually."
+          SLACK_COLOR: "danger"
