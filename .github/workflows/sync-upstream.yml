@@ -9,22 +9,64 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync with upstream
-        uses: repo-sync/pull-request@v2
+      # Step 1: Check out your fork's code
+      - name: Checkout Fork
+        uses: actions/checkout@v4
         with:
-          source_branch: "" # Sync all branches
-          destination_branch: "" # To the same branches in your fork
-          upstream_repository: "https://github.com/openjdk/jdk"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          pr_title: "Sync with upstream"
-          pr_body: "This PR syncs the latest changes from the upstream repository."
-          pr_assignee: "${{ github.actor }}"
-          pr_reviewer: "${{ github.actor }}"
+          # We need to fetch all history and branches for the merge
+          fetch-depth: 0
 
-      - name: Notify on failure
+      # Step 2: Sync and merge from the upstream repository
+      - name: Sync from Upstream
+        id: sync
+        run: |
+          # The default branch for the OpenJDK repository is 'master'
+          UPSTREAM_URL="https://github.com/openjdk/jdk.git"
+          UPSTREAM_BRANCH="master"
+          # This will be the branch in your fork that receives the updates
+          TARGET_BRANCH="master"
+          
+          # Add the upstream repository as a remote
+          git remote add upstream $UPSTREAM_URL
+          
+          # Fetch all branches from the upstream repository
+          git fetch upstream
+          
+          # Merge the upstream branch into your target branch
+          # If there are conflicts, this command will fail, stopping the workflow
+          git merge "upstream/${UPSTREAM_BRANCH}"
+          
+          # Push the changes to your fork
+          git push origin "${TARGET_BRANCH}"
+
+      # Step 3: Create a Pull Request if there are changes
+      # This action automatically detects if a merge happened and a PR is needed
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "Sync with upstream openjdk/jdk"
+          body: |
+            This pull request was automatically generated to sync this fork
+            with the latest changes from the upstream `openjdk/jdk` repository.
+          commit-message: "feat: sync with upstream"
+          branch: "sync-upstream" # Creates a temporary branch for the PR
+          base: "master" # The PR will target your 'master' branch
+          assignees: "${{ github.actor }}"
+          reviewers: "${{ github.actor }}"
+          
+      # Step 4: Notify on failure (e.g., a merge conflict)
+      - name: Notify on failure via email
         if: ${{ failure() }}
-        uses: rtCamp/action-slack-notify@v2
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_MESSAGE: "Upstream sync failed with merge conflicts. Please resolve them manually."
-          SLACK_COLOR: "danger"
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Upstream Sync Failed for ${{ github.repository }}"
+          body: |
+            The weekly sync with the upstream OpenJDK repository has failed due to merge conflicts.
+            Please log in to GitHub to resolve them manually.
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: your-email@example.com
+          from: GitHub Actions <${{ secrets.MAIL_USERNAME }}>
