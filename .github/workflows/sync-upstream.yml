@@ -26,7 +26,8 @@ jobs:
           git remote add upstream https://github.com/openjdk/jdk.git
           git fetch upstream
           
-          git merge upstream/master
+          # Merge with the new flag to allow unrelated histories
+          git merge upstream/master --allow-unrelated-histories
         
       # Step 3: Create the Pull Request
       - name: Create Pull Request
@@ -41,16 +42,9 @@ jobs:
           reviewers: "${{ github.actor }}"
           delete-branch: true
 
-      # --- This entire step is temporarily disabled ---
+      # --- Notification step is still disabled ---
       # - name: Notify on failure via email
       #   if: ${{ failure() }}
       #   uses: dawidd6/action-send-mail@v3
       #   with:
-      #     server_address: ${{ secrets.MAIL_SERVER }}
-      #     server_port: ${{ secrets.MAIL_PORT }}
-      #     username: ${{ secrets.MAIL_USERNAME }}
-      #     password: ${{ secrets.MAIL_PASSWORD }}
-      #     subject: "Upstream Sync Failed for ${{ github.repository }}"
-      #     body: "The sync with the upstream OpenJDK repository failed due to merge conflicts. Please resolve them manually in the 'sync-upstream' branch."
-      #     to: your-email@example.com
-      #     from: GitHub Actions <${{ secrets.MAIL_USERNAME }}>
+      #     # ... email settings ...
