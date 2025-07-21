@@ -32,9 +32,9 @@ jobs:
       - name: Check for updates
         id: check_updates
         run: |
-          # Compare local master with upstream master
-          LOCAL_COMMIT=$(git rev-parse origin/master)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/master)
+          # Compare local main with upstream main
+          LOCAL_COMMIT=$(git rev-parse origin/main)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
           
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "updates_available=true" >> $GITHUB_OUTPUT
@@ -55,8 +55,8 @@ jobs:
         if: steps.check_updates.outputs.updates_available == 'true'
         id: merge_attempt
         run: |
-          # Try to merge upstream/master
-          if git merge upstream/master --no-edit; then
+          # Try to merge upstream/main
+          if git merge upstream/main --no-edit; then
             echo "merge_success=true" >> $GITHUB_OUTPUT
             echo "conflicts=false" >> $GITHUB_OUTPUT
           else
@@ -66,13 +66,29 @@ jobs:
             git merge --abort
           fi
 
-      - name: Push sync branch (successful merge)
+      - name: Check for actual changes
         if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true'
+        id: check_changes
+        run: |
+          # Check if there are any differences between sync branch and main
+          if git diff --quiet origin/main; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "📝 No actual changes detected after merge (commits may have been already integrated)"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            # Count the number of changed files for reporting
+            CHANGED_FILES=$(git diff --name-only origin/main | wc -l)
+            echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+            echo "📝 Detected $CHANGED_FILES changed files"
+          fi
+
+      - name: Push sync branch (with changes)
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true'
         run: |
           git push origin $SYNC_BRANCH
 
-      - name: Create Pull Request (successful merge)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true'
+      - name: Create Pull Request (with changes)
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -81,16 +97,17 @@ jobs:
               repo: context.repo.repo,
               title: `Sync with upstream (${new Date().toISOString().split('T')[0]})`,
               head: process.env.SYNC_BRANCH,
-              base: 'master',
+              base: 'main',
               body: `## Automated Upstream Sync
               
               This PR contains updates from the upstream OpenJDK repository.
               
               **Upstream commit**: ${{ steps.check_updates.outputs.upstream_commit }}
               **Previous commit**: ${{ steps.check_updates.outputs.local_commit }}
+              **Changed files**: ${{ steps.check_changes.outputs.changed_files }}
               
               ### Changes
-              - Merged latest changes from upstream/master
+              - Merged latest changes from upstream/main
               - Regression tests will run automatically
               
               **Note**: This PR was created automatically. Review the changes before merging.`,
@@ -104,6 +121,14 @@ jobs:
               issue_number: pr.number,
               labels: ['upstream-sync', 'automated']
             });
+
+      - name: Clean up sync branch (no changes)
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'false'
+        run: |
+          # Delete the sync branch since no changes were detected
+          git checkout main
+          git branch -D $SYNC_BRANCH
+          echo "✅ Upstream commits were already integrated - no PR needed"
 
       - name: Create conflict notification issue
         if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.conflicts == 'true'
@@ -143,7 +168,7 @@ jobs:
                 2. **Create conflict resolution branch:**
                    \`\`\`bash
                    git checkout -b sync/upstream-manual-$(date +%Y%m%d)
-                   git merge upstream/master
+                   git merge upstream/main
                    \`\`\`
                 
                 3. **Resolve conflicts manually and commit:**
@@ -164,7 +189,30 @@ jobs:
               });
             }
 
-      - name: No updates notification
-        if: steps.check_updates.outputs.updates_available == 'false'
+      - name: Workflow summary
+        if: always()
         run: |
-          echo "✅ Repository is up to date with upstream"
+          echo "=== Upstream Sync Summary ==="
+          
+          if [ "${{ steps.check_updates.outputs.updates_available }}" == "false" ]; then
+            echo "✅ Repository is already up to date with upstream"
+            echo "   Local: ${{ steps.check_updates.outputs.local_commit }}"
+            echo "   Upstream: ${{ steps.check_updates.outputs.upstream_commit }}"
+            
+          elif [ "${{ steps.merge_attempt.outputs.conflicts }}" == "true" ]; then
+            echo "⚠️  Merge conflicts detected - manual resolution required"
+            echo "   A GitHub issue has been created with resolution steps"
+            
+          elif [ "${{ steps.check_changes.outputs.has_changes }}" == "false" ]; then
+            echo "✅ Upstream commits were already integrated - no changes to merge"
+            echo "   This can happen when commits are cherry-picked or already merged"
+            
+          elif [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
+            echo "✅ Successfully created sync PR with ${{ steps.check_changes.outputs.changed_files }} changed files"
+            echo "   Pull request created and tests will run automatically"
+            
+          else
+            echo "❓ Unexpected workflow state - check the logs above"
+          fi
+          
+          echo "=========================="
