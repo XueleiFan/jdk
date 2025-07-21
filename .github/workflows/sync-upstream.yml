@@ -26,8 +26,16 @@ jobs:
           git remote add upstream https://github.com/openjdk/jdk.git || true
           git remote set-url upstream https://github.com/openjdk/jdk.git
 
-      - name: Fetch upstream
-        run: git fetch upstream
+      - name: Fetch upstream (master branch and all tags)
+        run: |
+          # Fetch master branch and all tags from upstream
+          git fetch upstream master --tags --prune
+          
+          # Log upstream info
+          echo "=== Upstream master branch info ==="
+          git log --oneline -5 upstream/master
+          echo "=== Available tags (last 10) ==="
+          git tag -l | tail -10
 
       - name: Check for updates
         id: check_updates
@@ -36,20 +44,42 @@ jobs:
           LOCAL_COMMIT=$(git rev-parse origin/master)
           UPSTREAM_COMMIT=$(git rev-parse upstream/master)
           
+          echo "local_commit=$LOCAL_COMMIT" >> $GITHUB_OUTPUT
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
+          
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "updates_available=true" >> $GITHUB_OUTPUT
-            echo "upstream_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
-            echo "local_commit=$LOCAL_COMMIT" >> $GITHUB_OUTPUT
           else
             echo "updates_available=false" >> $GITHUB_OUTPUT
           fi
+          
+          # Check for new tags
+          LOCAL_TAGS=$(git tag -l | wc -l)
+          git fetch upstream --tags
+          UPSTREAM_TAGS=$(git tag -l | wc -l)
+          
+          if [ "$UPSTREAM_TAGS" -gt "$LOCAL_TAGS" ]; then
+            echo "new_tags=true" >> $GITHUB_OUTPUT
+            NEW_TAG_COUNT=$((UPSTREAM_TAGS - LOCAL_TAGS))
+            echo "new_tag_count=$NEW_TAG_COUNT" >> $GITHUB_OUTPUT
+          else
+            echo "new_tags=false" >> $GITHUB_OUTPUT
+            echo "new_tag_count=0" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create sync branch
-        if: steps.check_updates.outputs.updates_available == 'true'
+        if: steps.check_updates.outputs.updates_available == 'true' || steps.check_updates.outputs.new_tags == 'true'
         run: |
           BRANCH_NAME="sync/upstream-$(date +%Y%m%d-%H%M%S)"
           echo "SYNC_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
           git checkout -b $BRANCH_NAME
+
+      - name: Sync tags
+        if: steps.check_updates.outputs.new_tags == 'true'
+        run: |
+          echo "📦 Syncing ${{ steps.check_updates.outputs.new_tag_count }} new tags from upstream"
+          # Push all tags to origin
+          git push origin --tags
 
       - name: Attempt merge
         if: steps.check_updates.outputs.updates_available == 'true'
@@ -83,47 +113,73 @@ jobs:
           fi
 
       - name: Push sync branch (with changes)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true'
+        if: |
+          (steps.check_updates.outputs.updates_available == 'true' && 
+           steps.merge_attempt.outputs.merge_success == 'true' && 
+           steps.check_changes.outputs.has_changes == 'true') ||
+          steps.check_updates.outputs.new_tags == 'true'
         run: |
           git push origin $SYNC_BRANCH
 
       - name: Create Pull Request (with changes)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true'
+        if: |
+          (steps.check_updates.outputs.updates_available == 'true' && 
+           steps.merge_attempt.outputs.merge_success == 'true' && 
+           steps.check_changes.outputs.has_changes == 'true') ||
+          steps.check_updates.outputs.new_tags == 'true'
         uses: actions/github-script@v7
         with:
           script: |
+            let title = `Sync with upstream (${new Date().toISOString().split('T')[0]})`;
+            let body = `## Automated Upstream Sync\n\n`;
+            
+            if ('${{ steps.check_updates.outputs.updates_available }}' === 'true') {
+              body += `This PR contains updates from the upstream OpenJDK repository.\n\n`;
+              body += `**Upstream commit**: ${{ steps.check_updates.outputs.upstream_commit }}\n`;
+              body += `**Previous commit**: ${{ steps.check_updates.outputs.local_commit }}\n`;
+              
+              if ('${{ steps.check_changes.outputs.has_changes }}' === 'true') {
+                body += `**Changed files**: ${{ steps.check_changes.outputs.changed_files }}\n\n`;
+                body += `### Code Changes\n`;
+                body += `- Merged latest changes from upstream/master\n`;
+              }
+            }
+            
+            if ('${{ steps.check_updates.outputs.new_tags }}' === 'true') {
+              body += `### Tags Updated\n`;
+              body += `- Synced ${{ steps.check_updates.outputs.new_tag_count }} new tags from upstream\n`;
+              title += ` + ${${{ steps.check_updates.outputs.new_tag_count }}} tags`;
+            }
+            
+            body += `\n### Testing\n`;
+            body += `- Regression tests will run automatically\n\n`;
+            body += `**Note**: This PR was created automatically. Review the changes before merging.`;
+            
             const { data: pr } = await github.rest.pulls.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Sync with upstream (${new Date().toISOString().split('T')[0]})`,
+              title: title,
               head: process.env.SYNC_BRANCH,
               base: 'master',
-              body: `## Automated Upstream Sync
-              
-              This PR contains updates from the upstream OpenJDK repository.
-              
-              **Upstream commit**: ${{ steps.check_updates.outputs.upstream_commit }}
-              **Previous commit**: ${{ steps.check_updates.outputs.local_commit }}
-              **Changed files**: ${{ steps.check_changes.outputs.changed_files }}
-              
-              ### Changes
-              - Merged latest changes from upstream/master
-              - Regression tests will run automatically
-              
-              **Note**: This PR was created automatically. Review the changes before merging.`,
+              body: body,
               draft: false
             });
             
-            // Add label
+            // Add labels
+            const labels = ['upstream-sync', 'automated'];
+            if ('${{ steps.check_updates.outputs.new_tags }}' === 'true') {
+              labels.push('tags-updated');
+            }
+            
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: pr.number,
-              labels: ['upstream-sync', 'automated']
+              labels: labels
             });
 
       - name: Clean up sync branch (no changes)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'false'
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'false' && steps.check_updates.outputs.new_tags == 'false'
         run: |
           # Delete the sync branch since no changes were detected
           git checkout master
@@ -162,7 +218,7 @@ jobs:
                    git clone ${{ github.server_url }}/${{ github.repository }}.git
                    cd ${{ github.event.repository.name }}
                    git remote add upstream https://github.com/openjdk/jdk.git
-                   git fetch upstream
+                   git fetch upstream master --tags
                    \`\`\`
                 
                 2. **Create conflict resolution branch:**
@@ -176,6 +232,9 @@ jobs:
                    # Edit conflicted files
                    git add .
                    git commit -m "Resolve upstream sync conflicts"
+                   
+                   # Sync tags if there are new ones
+                   git push origin --tags
                    git push origin sync/upstream-manual-$(date +%Y%m%d)
                    \`\`\`
                 
@@ -194,7 +253,7 @@ jobs:
         run: |
           echo "=== Upstream Sync Summary ==="
           
-          if [ "${{ steps.check_updates.outputs.updates_available }}" == "false" ]; then
+          if [ "${{ steps.check_updates.outputs.updates_available }}" == "false" ] && [ "${{ steps.check_updates.outputs.new_tags }}" == "false" ]; then
             echo "✅ Repository is already up to date with upstream"
             echo "   Local: ${{ steps.check_updates.outputs.local_commit }}"
             echo "   Upstream: ${{ steps.check_updates.outputs.upstream_commit }}"
@@ -202,17 +261,23 @@ jobs:
           elif [ "${{ steps.merge_attempt.outputs.conflicts }}" == "true" ]; then
             echo "⚠️  Merge conflicts detected - manual resolution required"
             echo "   A GitHub issue has been created with resolution steps"
+            if [ "${{ steps.check_updates.outputs.new_tags }}" == "true" ]; then
+              echo "   Note: ${{ steps.check_updates.outputs.new_tag_count }} new tags were synced automatically"
+            fi
             
-          elif [ "${{ steps.check_changes.outputs.has_changes }}" == "false" ]; then
+          elif [ "${{ steps.check_changes.outputs.has_changes }}" == "false" ] && [ "${{ steps.check_updates.outputs.new_tags }}" == "false" ]; then
             echo "✅ Upstream commits were already integrated - no changes to merge"
             echo "   This can happen when commits are cherry-picked or already merged"
             
-          elif [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
-            echo "✅ Successfully created sync PR with ${{ steps.check_changes.outputs.changed_files }} changed files"
-            echo "   Pull request created and tests will run automatically"
-            
           else
-            echo "❓ Unexpected workflow state - check the logs above"
+            echo "✅ Successfully created sync PR"
+            if [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
+              echo "   - Code changes: ${{ steps.check_changes.outputs.changed_files }} files modified"
+            fi
+            if [ "${{ steps.check_updates.outputs.new_tags }}" == "true" ]; then
+              echo "   - Tags synced: ${{ steps.check_updates.outputs.new_tag_count }} new tags"
+            fi
+            echo "   Pull request created and tests will run automatically"
           fi
           
           echo "=========================="
