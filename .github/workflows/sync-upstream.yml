@@ -32,9 +32,9 @@ jobs:
       - name: Check for updates
         id: check_updates
         run: |
-          # Compare local main with upstream main
-          LOCAL_COMMIT=$(git rev-parse origin/main)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          # Compare local master with upstream master
+          LOCAL_COMMIT=$(git rev-parse origin/master)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/master)
           
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "updates_available=true" >> $GITHUB_OUTPUT
@@ -55,8 +55,8 @@ jobs:
         if: steps.check_updates.outputs.updates_available == 'true'
         id: merge_attempt
         run: |
-          # Try to merge upstream/main
-          if git merge upstream/main --no-edit; then
+          # Try to merge upstream/master
+          if git merge upstream/master --no-edit; then
             echo "merge_success=true" >> $GITHUB_OUTPUT
             echo "conflicts=false" >> $GITHUB_OUTPUT
           else
@@ -81,7 +81,7 @@ jobs:
               repo: context.repo.repo,
               title: `Sync with upstream (${new Date().toISOString().split('T')[0]})`,
               head: process.env.SYNC_BRANCH,
-              base: 'main',
+              base: 'master',
               body: `## Automated Upstream Sync
               
               This PR contains updates from the upstream OpenJDK repository.
@@ -90,7 +90,7 @@ jobs:
               **Previous commit**: ${{ steps.check_updates.outputs.local_commit }}
               
               ### Changes
-              - Merged latest changes from upstream/main
+              - Merged latest changes from upstream/master
               - Regression tests will run automatically
               
               **Note**: This PR was created automatically. Review the changes before merging.`,
@@ -143,7 +143,7 @@ jobs:
                 2. **Create conflict resolution branch:**
                    \`\`\`bash
                    git checkout -b sync/upstream-manual-$(date +%Y%m%d)
-                   git merge upstream/main
+                   git merge upstream/master
                    \`\`\`
                 
                 3. **Resolve conflicts manually and commit:**
