@@ -32,9 +32,9 @@ jobs:
       - name: Check for updates
         id: check_updates
         run: |
-          # Compare local main with upstream main
-          LOCAL_COMMIT=$(git rev-parse origin/main)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          # Compare local master with upstream master
+          LOCAL_COMMIT=$(git rev-parse origin/master)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/master)
           
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "updates_available=true" >> $GITHUB_OUTPUT
@@ -55,8 +55,8 @@ jobs:
         if: steps.check_updates.outputs.updates_available == 'true'
         id: merge_attempt
         run: |
-          # Try to merge upstream/main
-          if git merge upstream/main --no-edit; then
+          # Try to merge upstream/master
+          if git merge upstream/master --no-edit; then
             echo "merge_success=true" >> $GITHUB_OUTPUT
             echo "conflicts=false" >> $GITHUB_OUTPUT
           else
@@ -70,14 +70,14 @@ jobs:
         if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true'
         id: check_changes
         run: |
-          # Check if there are any differences between sync branch and main
-          if git diff --quiet origin/main; then
+          # Check if there are any differences between sync branch and master
+          if git diff --quiet origin/master; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "📝 No actual changes detected after merge (commits may have been already integrated)"
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
             # Count the number of changed files for reporting
-            CHANGED_FILES=$(git diff --name-only origin/main | wc -l)
+            CHANGED_FILES=$(git diff --name-only origin/master | wc -l)
             echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
             echo "📝 Detected $CHANGED_FILES changed files"
           fi
@@ -97,7 +97,7 @@ jobs:
               repo: context.repo.repo,
               title: `Sync with upstream (${new Date().toISOString().split('T')[0]})`,
               head: process.env.SYNC_BRANCH,
-              base: 'main',
+              base: 'master',
               body: `## Automated Upstream Sync
               
               This PR contains updates from the upstream OpenJDK repository.
@@ -107,7 +107,7 @@ jobs:
               **Changed files**: ${{ steps.check_changes.outputs.changed_files }}
               
               ### Changes
-              - Merged latest changes from upstream/main
+              - Merged latest changes from upstream/master
               - Regression tests will run automatically
               
               **Note**: This PR was created automatically. Review the changes before merging.`,
@@ -126,7 +126,7 @@ jobs:
         if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'false'
         run: |
           # Delete the sync branch since no changes were detected
-          git checkout main
+          git checkout master
           git branch -D $SYNC_BRANCH
           echo "✅ Upstream commits were already integrated - no PR needed"
 
@@ -168,7 +168,7 @@ jobs:
                 2. **Create conflict resolution branch:**
                    \`\`\`bash
                    git checkout -b sync/upstream-manual-$(date +%Y%m%d)
-                   git merge upstream/main
+                   git merge upstream/master
                    \`\`\`
                 
                 3. **Resolve conflicts manually and commit:**
