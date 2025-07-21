@@ -77,81 +77,122 @@ jobs:
           echo "SYNC_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
           git checkout -b $BRANCH_NAME
 
-      - name: Attempt merge
+      - name: Attempt rebase (preserve commit history)
         if: steps.check_updates.outputs.updates_available == 'true'
-        id: merge_attempt
+        id: rebase_attempt
         run: |
-          # Try to merge upstream/master
-          if git merge upstream/master --no-edit; then
-            echo "merge_success=true" >> $GITHUB_OUTPUT
-            echo "conflicts=false" >> $GITHUB_OUTPUT
-            echo "✅ Merge completed successfully"
+          echo "🔄 Attempting to rebase local changes on upstream/master"
+          
+          # Check if there are local commits ahead of upstream
+          LOCAL_AHEAD=$(git rev-list --count origin/master ^upstream/master)
+          echo "Local commits ahead of upstream: $LOCAL_AHEAD"
+          
+          if [ "$LOCAL_AHEAD" -eq 0 ]; then
+            # No local commits, can do fast-forward merge
+            echo "📝 No local commits detected - performing fast-forward update"
+            if git merge upstream/master --ff-only; then
+              echo "rebase_success=true" >> $GITHUB_OUTPUT
+              echo "conflicts=false" >> $GITHUB_OUTPUT
+              echo "strategy=fast-forward" >> $GITHUB_OUTPUT
+              echo "✅ Fast-forward merge completed successfully"
+            else
+              echo "rebase_success=false" >> $GITHUB_OUTPUT
+              echo "conflicts=true" >> $GITHUB_OUTPUT
+              echo "strategy=fast-forward" >> $GITHUB_OUTPUT
+              echo "❌ Fast-forward merge failed"
+              git merge --abort 2>/dev/null || true
+            fi
           else
-            echo "merge_success=false" >> $GITHUB_OUTPUT
-            echo "conflicts=true" >> $GITHUB_OUTPUT
-            echo "❌ Merge conflicts detected"
-            # Reset to clean state
-            git merge --abort
+            # Local commits exist, need to rebase
+            echo "📝 Local commits detected - performing rebase to preserve history"
+            if git rebase upstream/master; then
+              echo "rebase_success=true" >> $GITHUB_OUTPUT
+              echo "conflicts=false" >> $GITHUB_OUTPUT
+              echo "strategy=rebase" >> $GITHUB_OUTPUT
+              echo "✅ Rebase completed successfully"
+            else
+              echo "rebase_success=false" >> $GITHUB_OUTPUT
+              echo "conflicts=true" >> $GITHUB_OUTPUT
+              echo "strategy=rebase" >> $GITHUB_OUTPUT
+              echo "❌ Rebase conflicts detected"
+              git rebase --abort
+            fi
           fi
 
       - name: Check for actual changes
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true'
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.rebase_success == 'true'
         id: check_changes
         run: |
           # Check if there are any differences between sync branch and master
           if git diff --quiet origin/master; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "📝 No actual changes detected after merge (commits may have been already integrated)"
+            echo "📝 No actual changes detected after ${{ steps.rebase_attempt.outputs.strategy }} (commits may have been already integrated)"
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
             # Count the number of changed files for reporting
             CHANGED_FILES=$(git diff --name-only origin/master | wc -l)
             echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
-            echo "📝 Detected $CHANGED_FILES changed files"
+            echo "📝 Detected $CHANGED_FILES changed files after ${{ steps.rebase_attempt.outputs.strategy }}"
           fi
 
-      - name: Auto-merge to master (no conflicts)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE == 'true'
+      - name: Auto-merge to master (clean rebase)
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.rebase_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE == 'true'
         id: auto_merge
         run: |
-          echo "🚀 Auto-merging upstream changes directly to master"
+          echo "🚀 Auto-pushing rebased changes directly to master"
+          echo "Strategy used: ${{ steps.rebase_attempt.outputs.strategy }}"
           
-          # Push the merged changes directly to master
-          git push origin HEAD:master
+          # Push the rebased changes directly to master
+          # Use --force-with-lease to be safe with rebased commits
+          if [ "${{ steps.rebase_attempt.outputs.strategy }}" == "rebase" ]; then
+            git push origin HEAD:master --force-with-lease
+          else
+            # Fast-forward merge, no force needed
+            git push origin HEAD:master
+          fi
           
-          echo "✅ Successfully auto-merged upstream changes"
+          echo "✅ Successfully auto-merged upstream changes with clean history"
           echo "   Changed files: ${{ steps.check_changes.outputs.changed_files }}"
           echo "   From: ${{ steps.check_updates.outputs.local_commit }}"
           echo "   To: ${{ steps.check_updates.outputs.upstream_commit }}"
+          echo "   Strategy: ${{ steps.rebase_attempt.outputs.strategy }}"
           
           echo "auto_merge_completed=true" >> $GITHUB_OUTPUT
 
       - name: Push sync branch (PR mode)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE != 'true'
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.rebase_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE != 'true'
         run: |
-          git push origin $SYNC_BRANCH
+          # For rebased commits, we need to force push the sync branch
+          if [ "${{ steps.rebase_attempt.outputs.strategy }}" == "rebase" ]; then
+            git push origin $SYNC_BRANCH --force-with-lease
+          else
+            git push origin $SYNC_BRANCH
+          fi
 
       - name: Create Pull Request (PR mode)
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE != 'true'
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.rebase_success == 'true' && steps.check_changes.outputs.has_changes == 'true' && env.AUTO_MERGE != 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const title = `Sync with upstream (${new Date().toISOString().split('T')[0]})`;
+            const strategy = '${{ steps.rebase_attempt.outputs.strategy }}';
             const body = `## Automated Upstream Sync
 
-            This PR contains updates from the upstream OpenJDK repository.
+            This PR contains updates from the upstream OpenJDK repository with **clean commit history** preserved.
 
             **Upstream commit**: ${{ steps.check_updates.outputs.upstream_commit }}
             **Previous commit**: ${{ steps.check_updates.outputs.local_commit }}
             **Changed files**: ${{ steps.check_changes.outputs.changed_files }}
+            **Sync strategy**: ${strategy === 'rebase' ? 'Rebase (preserves linear history)' : 'Fast-forward (no merge commits)'}
 
             ### Changes
-            - Merged latest changes from upstream/master
+            - ${strategy === 'rebase' ? 'Rebased local changes on' : 'Fast-forwarded to'} latest upstream/master
+            - **No merge commits added** - clean commit history maintained
 
             ### Testing
             - Regression tests will run automatically
 
-            **Note**: This PR was created automatically. Review the changes before merging.`;
+            **Note**: This PR was created automatically and preserves the original commit history from upstream.`;
             
             const { data: pr } = await github.rest.pulls.create({
               owner: context.repo.owner,
@@ -168,25 +209,25 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: pr.number,
-              labels: ['upstream-sync', 'automated']
+              labels: ['upstream-sync', 'automated', 'clean-history']
             });
 
       - name: Clean up sync branch (no changes or auto-merged)
         if: |
-          (steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.merge_success == 'true' && steps.check_changes.outputs.has_changes == 'false') ||
+          (steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.rebase_success == 'true' && steps.check_changes.outputs.has_changes == 'false') ||
           steps.auto_merge.outputs.auto_merge_completed == 'true'
         run: |
           # Delete the sync branch since it's no longer needed
           git checkout master
           git branch -D $SYNC_BRANCH
           if [ "${{ steps.auto_merge.outputs.auto_merge_completed }}" == "true" ]; then
-            echo "✅ Auto-merge completed - sync branch cleaned up"
+            echo "✅ Auto-merge completed with clean history - sync branch cleaned up"
           else
             echo "✅ No changes detected - sync branch cleaned up"
           fi
 
       - name: Create conflict notification issue
-        if: steps.check_updates.outputs.updates_available == 'true' && steps.merge_attempt.outputs.conflicts == 'true'
+        if: steps.check_updates.outputs.updates_available == 'true' && steps.rebase_attempt.outputs.conflicts == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -198,17 +239,20 @@ jobs:
               labels: 'upstream-sync-conflict'
             });
             
+            const strategy = '${{ steps.rebase_attempt.outputs.strategy }}';
+            
             if (existingIssues.data.length === 0) {
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: '🚨 Upstream Sync Conflicts Detected',
-                body: `## Merge Conflicts Detected
+                body: `## ${strategy === 'rebase' ? 'Rebase' : 'Fast-forward'} Conflicts Detected
                 
-                The automated upstream sync has detected merge conflicts that require manual resolution.
+                The automated upstream sync has detected conflicts that require manual resolution.
                 
                 **Upstream commit**: ${{ steps.check_updates.outputs.upstream_commit }}
                 **Current commit**: ${{ steps.check_updates.outputs.local_commit }}
+                **Strategy**: ${strategy === 'rebase' ? 'Rebase (preserve clean history)' : 'Fast-forward merge'}
                 
                 ### To resolve manually:
                 
@@ -223,15 +267,15 @@ jobs:
                 2. **Create conflict resolution branch:**
                    \`\`\`bash
                    git checkout -b sync/upstream-manual-$(date +%Y%m%d)
-                   git merge upstream/master
+                   ${strategy === 'rebase' ? 'git rebase upstream/master' : 'git merge upstream/master --ff-only'}
                    \`\`\`
                 
                 3. **Resolve conflicts manually and commit:**
                    \`\`\`bash
-                   # Edit conflicted files
-                   git add .
-                   git commit -m "Resolve upstream sync conflicts"
-                   git push origin sync/upstream-manual-$(date +%Y%m%d)
+                   ${strategy === 'rebase' ? '# Edit conflicted files\n                   git add .\n                   git rebase --continue' : '# For fast-forward conflicts, you may need to:\n                   # 1. Stash or commit local changes\n                   # 2. Pull upstream changes\n                   # 3. Reapply your changes'}
+                   
+                   # Push resolved changes
+                   git push origin sync/upstream-manual-$(date +%Y%m%d) ${strategy === 'rebase' ? '--force-with-lease' : ''}
                    \`\`\`
                 
                 4. **Create pull request** with the resolved changes
@@ -240,7 +284,7 @@ jobs:
                 
                 ---
                 *This issue was created automatically by the upstream sync workflow.*`,
-                labels: ['upstream-sync-conflict', 'manual-intervention-required']
+                labels: ['upstream-sync-conflict', 'manual-intervention-required', 'clean-history']
               });
             }
 
@@ -249,6 +293,7 @@ jobs:
         run: |
           echo "=== Upstream Sync Summary ==="
           echo "Auto-merge mode: ${{ env.AUTO_MERGE }}"
+          echo "History preservation: Clean commit history maintained"
           echo
           
           if [ "${{ steps.check_updates.outputs.updates_available }}" == "false" ]; then
@@ -256,23 +301,28 @@ jobs:
             echo "   Local: ${{ steps.check_updates.outputs.local_commit }}"
             echo "   Upstream: ${{ steps.check_updates.outputs.upstream_commit }}"
             
-          elif [ "${{ steps.merge_attempt.outputs.conflicts }}" == "true" ]; then
-            echo "⚠️  Merge conflicts detected - manual resolution required"
+          elif [ "${{ steps.rebase_attempt.outputs.conflicts }}" == "true" ]; then
+            echo "⚠️  ${{ steps.rebase_attempt.outputs.strategy }} conflicts detected - manual resolution required"
             echo "   A GitHub issue has been created with resolution steps"
+            echo "   Strategy: ${{ steps.rebase_attempt.outputs.strategy }}"
             
           elif [ "${{ steps.check_changes.outputs.has_changes }}" == "false" ]; then
-            echo "✅ Upstream commits were already integrated - no changes to merge"
-            echo "   This can happen when commits are cherry-picked or already merged"
+            echo "✅ Upstream commits were already integrated - no changes to apply"
+            echo "   This can happen when commits are cherry-picked or already applied"
             
           elif [ "${{ steps.auto_merge.outputs.auto_merge_completed }}" == "true" ]; then
-            echo "🚀 Successfully auto-merged upstream changes to master"
+            echo "🚀 Successfully auto-merged upstream changes to master with clean history"
             echo "   - Changed files: ${{ steps.check_changes.outputs.changed_files }}"
+            echo "   - Strategy: ${{ steps.rebase_attempt.outputs.strategy }}"
+            echo "   - No merge commits added"
             echo "   - No manual review required"
             echo "   - Master branch is now current with upstream"
             
           elif [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
-            echo "📝 Successfully created sync PR (auto-merge disabled)"
+            echo "📝 Successfully created sync PR with clean history (auto-merge disabled)"
             echo "   - Changed files: ${{ steps.check_changes.outputs.changed_files }}"
+            echo "   - Strategy: ${{ steps.rebase_attempt.outputs.strategy }}"
+            echo "   - No merge commits will be added"
             echo "   - Pull request created and tests will run automatically"
             echo "   - Manual review and approval required"
             
