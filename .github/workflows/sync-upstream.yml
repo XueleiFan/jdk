@@ -4,7 +4,7 @@ on:
   schedule:
     # Run every Sunday at 02:00 UTC (weekly)
     # - cron: '0 2 * * 0'
-    - cron: '20 22 * * *'
+    - cron: '0 23 * * *'
   workflow_dispatch: # Allow manual triggering
     inputs:
       auto_merge:
