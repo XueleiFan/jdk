@@ -3,8 +3,7 @@ name: Sync with Upstream
 on:
   schedule:
     # Run every Sunday at 02:00 UTC (weekly)
-    # - cron: '0 2 * * 0'
-    - cron: '0 23 * * *'
+    - cron: '0 2 * * 0'
   workflow_dispatch: # Allow manual triggering
     inputs:
       auto_merge:
@@ -21,6 +20,8 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
+  workflows: write
 
 jobs:
   sync:
