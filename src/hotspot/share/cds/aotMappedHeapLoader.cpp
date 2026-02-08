@@ -711,18 +711,97 @@ void AOTMappedHeapLoader::patch_narrow_klass_ids() {
   if (AOTCacheParallelRelocation && heap_size >= 1 * M) {
     // Determine number of chunks based on heap size.
     // Use ~256KB per chunk as a reasonable granularity, with min 2 and max 32 chunks.
-    int num_chunks = MAX2(2, MIN2(32, (int)(heap_size / (256 * K))));
+    // IMPORTANT: num_chunks must not exceed ArchiveWorkers::max_dispatch_chunks(),
+    // otherwise some chunks will never be processed.
+    int max_chunks = ArchiveWorkers::max_dispatch_chunks();
+    int desired_chunks = MAX2(2, MIN2(32, (int)(heap_size / (256 * K))));
+    int num_chunks = MIN2(desired_chunks, max_chunks);
+    log_debug(aot, heap)("Using %d chunks (desired=%d, max_dispatch=%d)", num_chunks, desired_chunks, max_chunks);
 
     // Pre-compute object boundaries at chunk splits (single sequential pass)
     HeapWord** chunk_boundaries = compute_parallel_chunk_boundaries(bottom, top, num_chunks);
+
+#ifdef ASSERT
+    // Verify chunk boundaries are within valid range and properly ordered
+    for (int i = 0; i <= num_chunks; i++) {
+      guarantee(chunk_boundaries[i] >= bottom && chunk_boundaries[i] <= top,
+                "Chunk boundary %d (" PTR_FORMAT ") out of range [" PTR_FORMAT ", " PTR_FORMAT "]",
+                i, p2i(chunk_boundaries[i]), p2i(bottom), p2i(top));
+      if (i > 0) {
+        guarantee(chunk_boundaries[i] >= chunk_boundaries[i-1],
+                  "Chunk boundaries not ordered: boundary[%d]=" PTR_FORMAT " < boundary[%d]=" PTR_FORMAT,
+                  i, p2i(chunk_boundaries[i]), i-1, p2i(chunk_boundaries[i-1]));
+      }
+    }
+    guarantee(chunk_boundaries[0] == bottom, "First boundary must be bottom");
+    guarantee(chunk_boundaries[num_chunks] == top, "Last boundary must be top");
+    log_debug(aot, heap)("Verified %d chunk boundaries", num_chunks + 1);
+#endif
 
     // Parallel patch using pre-computed boundaries
     ArchiveWorkers workers;
     PatchNarrowKlassIdsTask task(chunk_boundaries, num_chunks);
     workers.run_task(&task);
 
-    FREE_C_HEAP_ARRAY(HeapWord*, chunk_boundaries);
     log_info(aot, heap)("Patched %zu narrow Klass IDs in heap (parallel, %d chunks)", task.patched_count(), num_chunks);
+
+    // Log chunk info for debugging BEFORE freeing
+    if (log_is_enabled(Debug, aot, heap)) {
+      for (int i = 0; i < num_chunks; i++) {
+        size_t chunk_bytes = pointer_delta(chunk_boundaries[i+1], chunk_boundaries[i], 1);
+        log_debug(aot, heap)("  Chunk %d: " PTR_FORMAT " - " PTR_FORMAT " (%zu bytes)",
+                  i, p2i(chunk_boundaries[i]), p2i(chunk_boundaries[i+1]), chunk_bytes);
+      }
+    }
+
+    FREE_C_HEAP_ARRAY(HeapWord*, chunk_boundaries);
+
+    // Verification: check that all objects have valid Klass pointers after parallel patching.
+    // This helps diagnose issues where parallel patching leaves corrupted mark words.
+    if (log_is_enabled(Debug, aot, heap)) {
+      log_debug(aot, heap)("Verifying patched heap objects...");
+      size_t verified_count = 0;
+      size_t error_count = 0;
+      for (HeapWord* p = bottom; p < top && error_count < 10; ) {
+        oop obj = cast_to_oop(p);
+        markWord mark = obj->mark();
+        narrowKlass nk = mark.narrow_klass();
+
+        // The narrowKlass should now be a valid runtime value
+        Klass* k = CompressedKlassPointers::decode_not_null(nk);
+        if (k == nullptr) {
+          log_error(aot, heap)("Object at " PTR_FORMAT " has null Klass after patching (nk=%u)",
+                    p2i(p), nk);
+          error_count++;
+          break;
+        }
+        if (!AOTMetaspace::in_aot_cache(k)) {
+          // Also try to get what the dump-time nk was and what it should remap to
+          narrowKlass expected_nk = NarrowKlassRemapper::remap(nk);  // nk might still be dump-time value
+          log_error(aot, heap)("Object at " PTR_FORMAT " has invalid Klass " PTR_FORMAT " after patching", p2i(p), p2i(k));
+          log_error(aot, heap)("  current nk=%u, if remapped would be nk=%u", nk, expected_nk);
+          log_error(aot, heap)("  mark word value: 0x%lx", mark.value());
+          error_count++;
+          break;
+        }
+
+        size_t obj_size = obj->size_given_klass(k);
+        if (obj_size == 0) {
+          log_error(aot, heap)("Object at " PTR_FORMAT " has zero size (Klass " PTR_FORMAT ", nk=%u)",
+                    p2i(p), p2i(k), nk);
+          error_count++;
+          break;
+        }
+
+        p += obj_size;
+        verified_count++;
+      }
+      if (error_count > 0) {
+        log_error(aot, heap)("Verification failed after %zu objects with %zu errors", verified_count, error_count);
+      } else {
+        log_debug(aot, heap)("Verified %zu objects after parallel patching", verified_count);
+      }
+    }
   } else {
     // Sequential patching for small heaps or when parallel is disabled
     size_t patched_count = patch_narrow_klass_ids_in_range(bottom, top);

@@ -437,6 +437,12 @@ public:
   ArchiveWorkers();
   ~ArchiveWorkers();
   void run_task(ArchiveWorkerTask* task);
+
+  // Returns the maximum number of chunks that will be dispatched in parallel mode.
+  // Callers should not create more task chunks than this to ensure all work is processed.
+  static int max_dispatch_chunks() {
+    return max_workers() * CHUNKS_PER_WORKER;
+  }
 };
 
 #endif // SHARE_CDS_ARCHIVEUTILS_HPP
