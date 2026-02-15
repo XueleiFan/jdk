@@ -319,6 +319,9 @@ void WriteClosure::do_ptr(void** p) {
   // The common case is (c). E.g., when writing the vmClasses into the archive.
   // We have (b) only when we don't have a corresponding source object. E.g.,
   // the archived c++ vtable entries.
+  //
+  // Note: This writes raw byte offsets (intptr_t), not scaled offset units like
+  // AOTCompressedPointers which is used for compact hashtable values only.
   address ptr = *(address*)p;
   if (ptr != nullptr && !ArchiveBuilder::current()->is_in_buffer_space(ptr)) {
     ptr = ArchiveBuilder::current()->get_buffered_addr(ptr);
@@ -331,9 +334,11 @@ void WriteClosure::do_ptr(void** p) {
 }
 
 void ReadClosure::do_ptr(void** p) {
+  // Read raw byte offset and convert to address.
   assert(*p == nullptr, "initializing previous initialized pointer.");
-  u4 narrowp = checked_cast<u4>(nextPtr());
-  *p = AOTCompressedPointers::decode<void*>(cast_from_u4(narrowp), _base_address);
+  intptr_t obj = nextPtr();
+  assert(obj >= 0, "sanity.");
+  *p = (obj != 0) ? (void*)(_base_address + obj) : (void*)obj;
 }
 
 void ReadClosure::do_u4(u4* p) {
