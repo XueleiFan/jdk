@@ -1311,6 +1311,12 @@
   VM_INT_CONSTANTS_GC(declare_constant,                                   \
                       declare_constant_with_value)                        \
                                                                           \
+  /*****************/                                                     \
+  /* CDS constants */                                                     \
+  /*****************/                                                     \
+                                                                          \
+  CDS_ONLY(declare_constant(AOTCompressedPointers::MetadataOffsetShift))  \
+                                                                          \
   /******************/                                                    \
   /* Useful globals */                                                    \
   /******************/                                                    \

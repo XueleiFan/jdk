@@ -97,13 +97,15 @@ public class FileMapInfo {
     headerObj = VMObjectFactory.newObject(FileMapHeader.class, header);
 
     // char* mapped_base_address = header->_mapped_base_address
-    // narrowPtr cloned_vtable_narrowPtr = header->_cloned_vtable_offset
+    // narrowPtr cloned_vtable_narrowPtr = header->_cloned_vtables
     // size_t cloned_vtable_offset = AOTCompressedPointers::get_byte_offset(cloned_vtable_narrowPtr);
     // CppVtableInfo** vtablesIndex = mapped_base_address + cloned_vtable_offset;
     mapped_base_address = get_AddressField(FileMapHeader_type, header, "_mapped_base_address");
     long cloned_vtable_narrowPtr = get_CIntegerField(FileMapHeader_type, header, "_cloned_vtables");
-    long cloned_vtable_offset = cloned_vtable_narrowPtr; // Currently narrowPtr is the same as offset
-    vtablesIndex = mapped_base_address.addOffsetTo(cloned_vtable_offset);
+    // narrowPtr stores scaled offset units (byte_offset >> MetadataOffsetShift).
+    // Apply the left shift to convert back to byte offset.
+    long metadataOffsetShift = db.lookupIntConstant("AOTCompressedPointers::MetadataOffsetShift").longValue();
+    vtablesIndex = mapped_base_address.addOffsetTo(cloned_vtable_narrowPtr << metadataOffsetShift);
 
     // CDSFileMapRegion* rw_region = &header->_region[rw];
     // char* rwRegionBaseAddress = rw_region->_mapped_base;
