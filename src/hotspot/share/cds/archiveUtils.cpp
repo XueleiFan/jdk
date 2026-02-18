@@ -312,33 +312,15 @@ void DumpRegion::pack(DumpRegion* next) {
 }
 
 void WriteClosure::do_ptr(void** p) {
-  // Write ptr into the archive; ptr can be:
-  //   (a) null                 -> written as 0
-  //   (b) a "buffered" address -> written as is
-  //   (c) a "source"   address -> convert to "buffered" and write
-  // The common case is (c). E.g., when writing the vmClasses into the archive.
-  // We have (b) only when we don't have a corresponding source object. E.g.,
-  // the archived c++ vtable entries.
-  //
-  // Note: This writes raw byte offsets (intptr_t), not scaled offset units like
-  // AOTCompressedPointers which is used for compact hashtable values only.
   address ptr = *(address*)p;
-  if (ptr != nullptr && !ArchiveBuilder::current()->is_in_buffer_space(ptr)) {
-    ptr = ArchiveBuilder::current()->get_buffered_addr(ptr);
-  }
-  // null pointers do not need to be converted to offsets
-  if (ptr != nullptr) {
-    ptr = (address)ArchiveBuilder::current()->buffer_to_offset(ptr);
-  }
-  _dump_region->append_intptr_t((intptr_t)ptr, false);
+  AOTCompressedPointers::narrowPtr narrowp = AOTCompressedPointers::encode(ptr);
+  _dump_region->append_intptr_t(checked_cast<intptr_t>(narrowp), false);
 }
 
 void ReadClosure::do_ptr(void** p) {
-  // Read raw byte offset and convert to address.
   assert(*p == nullptr, "initializing previous initialized pointer.");
-  intptr_t obj = nextPtr();
-  assert(obj >= 0, "sanity.");
-  *p = (obj != 0) ? (void*)(_base_address + obj) : (void*)obj;
+  u4 narrowp = checked_cast<u4>(nextPtr());
+  *p = AOTCompressedPointers::decode<void*>(cast_from_u4(narrowp), _base_address);
 }
 
 void ReadClosure::do_u4(u4* p) {
