@@ -102,10 +102,10 @@ void CompactHashtableWriter::allocate_table() {
   _compact_entries = (u4*)ArchiveBuilder::ro_region_alloc(_num_compact_entries * sizeof(u4));
 
   _stats->bucket_count    = _num_buckets;
-  _stats->bucket_bytes    = align_up(_num_compact_buckets * sizeof(u4),
+  _stats->bucket_bytes    = align_up(checked_cast<int>(_num_compact_buckets * sizeof(u4)),
                                      SharedSpaceObjectAlignment);
   _stats->hashentry_count = _num_entries_written;
-  _stats->hashentry_bytes = align_up(_num_compact_entries * sizeof(u4),
+  _stats->hashentry_bytes = align_up(checked_cast<int>(_num_compact_entries * sizeof(u4)),
                                      SharedSpaceObjectAlignment);
 }
 
